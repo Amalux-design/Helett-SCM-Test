@@ -24,7 +24,7 @@ export const SKU_MAP = {
   "B0CL4GVKSN":{"sellerSku":"UNIY T10 Mini Projector","finalName":"T10 Mini Projector"},
   "B0BFRS5BLT":{"sellerSku":"UY8401 Smart Digital Door Lock FBA","finalName":"UY8401 Door Lock"},
   "B0CB1DDNV7":{"sellerSku":"UY20 Streaming mic","finalName":"UY20 Streaming Mic"},
-  "B0CJVGCB4K":{"sellerSku":"H30c printer (White)","finalName":"H30c Printer (New)"},
+  "B0CJVGCB4K":{"sellerSku":"H30c printer (White)","finalName":"H30c Printer (Rapid Label Neo)"},
   "B0CRB2KDC6":{"sellerSku":"HT320 Digital Door MFN","finalName":"HT320 Smart Lock"},
   "B01G46PYPO":{"sellerSku":"UC46 New Projector 12","finalName":"UC46 Projector 12"},
   "B0BZ8HF4WL":{"sellerSku":"UNIY UY410 Barcode Scanner","finalName":"UY410 Barcode Scanner"},

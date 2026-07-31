@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef, useMemo, forwardRef, useImperativeHandle } from "react";
+import { createPortal } from "react-dom";
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine, BarChart, Bar, Cell } from "recharts";
 import { SKU_MAP } from "./data/skuMap.js";
 import { FC_CITY, fcLabel, FC_REGION } from "./data/fcMapping.js";
@@ -68,6 +69,22 @@ function fmtDate(d) {
 function extractSheetId(url) {
   const m = url.match(/\/spreadsheets\/d\/([a-zA-Z0-9_-]+)/);
   return m ? m[1] : null;
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   CSV EXPORT
+═══════════════════════════════════════════════════════════════ */
+function csvCell(v) {
+  const str = v===null||v===undefined ? "" : String(v);
+  return /[",\n]/.test(str) ? `"${str.replace(/"/g,'""')}"` : str;
+}
+function downloadCSV(filename, headers, rows) {
+  const lines = [headers.map(csvCell).join(","), ...rows.map(r=>r.map(csvCell).join(","))];
+  const blob = new Blob(["﻿"+lines.join("\r\n")], {type:"text/csv;charset=utf-8"});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = filename; a.click();
+  URL.revokeObjectURL(url);
 }
 
 /* ═══════════════════════════════════════════════════════════════
@@ -367,17 +384,28 @@ function processLeadtime(rows) {
    Excludes Status == "Delivered" (case-insensitive).
    O(n) single pass.
 ═══════════════════════════════════════════════════════════════ */
-function buildOpenPoMap(rows) {
+// poSelection: optional { [asin]: { [rowKey]: false } } — a PO row is included unless
+// explicitly set to false (opt-out model, so default behavior with no selections is unchanged).
+// Keyed by ROW POSITION (1,2,3,...), not the PO Number text — two line items can legitimately
+// share the same real PO Number (e.g. split shipments), and keying by that text would make
+// checking/unchecking one row affect every other row with the same PO Number.
+// rowKey numbering matches the per-asin order used in the SKU Detail "Active Purchase Orders"
+// table (and its "PO-N" fallback label) so checkbox state lines up with what the user sees there.
+function buildOpenPoMap(rows, poSelection) {
   if (!rows || !rows.length) return {};
   const get = makeGet(rows);
   const map = {};
+  const asinIdx = {};
   rows.forEach(r => {
     const asin   = s(r, get, "ASIN", "asin");
     const status = s(r, get, "Status", "status").toLowerCase().trim();
     if (!asin) return;
     if (status === "delivered") return;
+    const rowKey = (asinIdx[asin] = (asinIdx[asin]||0) + 1);
     const qty = n(r, get, "Tr Qty", "tr qty", "Qty", "qty", "Quantity", "quantity");
     if (qty <= 0) return;
+    const included = poSelection?.[asin]?.[rowKey] !== false;
+    if (!included) return;
     map[asin] = (map[asin] || 0) + qty;
   });
   return map;
@@ -553,7 +581,7 @@ function buildForecast(cs, demand, anchorDate, days=70){
    • Passes anchorDate through all velocity/forecast calls
    • Attaches regionalSales to each SKU
 ═══════════════════════════════════════════════════════════════ */
-function computeAll(inv, salesByAsinDay, fcData, settings, anchorDate, regionalSales, citySales, ltData, poUnits, lastOrderDate, salesByAsinDayChart, openPoMap, skuCfg){
+function computeAll(inv, salesByAsinDay, fcData, settings, anchorDate, regionalSales, citySales, ltData, poUnits, lastOrderDate, salesByAsinDayChart, openPoMap, skuCfg, extraInbound){
   const res={};
   // Stock inclusion flags
   const inclFBA      = settings.inclFBA      !== false;
@@ -565,7 +593,10 @@ function computeAll(inv, salesByAsinDay, fcData, settings, anchorDate, regionalS
     const d = inv[asin];
     const vel = calcVelocity(asin, salesByAsinDay, anchorDate);
     // Centralized effective stock — only affects planning/DOI/forecast, not FC breakdown
-    const inboundUnits = (d.inbound||0) + (d.processing||0)*0.8;
+    // "Add Inbound" manual field — extra units the user adds on top of the file's
+    // Inbound figure; gated by the same "Include Inbound" checkbox, not a separate one.
+    const manualInboundQty = extraInbound?.[asin] ?? 0;
+    const inboundUnits = (d.inbound||0) + (d.processing||0)*0.8 + manualInboundQty;
     // On Hand = FBA Available + FC Transfer; toggle FC Transfer in/out
     const fbaStock      = inclFBA      ? (d.fbaAvailable||0) : 0;
     const transferStock = inclTransfer ? (d.fcTransfer||0)   : 0;
@@ -616,6 +647,7 @@ function computeAll(inv, salesByAsinDay, fcData, settings, anchorDate, regionalS
       skuSeaLT, skuAirLT,
       purchasedUnits: poUnits?.[asin] ?? 0,
       openPoQty: autoPoQty,
+      extraInboundUnits: manualInboundQty,
       priorityDemand: priorityDemand>0 ? priorityDemand : null,
       effectiveDemand: effDemand,
       regionalSales: regionalSales?.[asin] || {},
@@ -1007,6 +1039,11 @@ const DataInput = forwardRef(function DataInput({onLoaded,loading,setLoading,t,p
 
   useImperativeHandle(ref,()=>({refreshSheets:loadSheets}));
 
+  // Auto-fetch Google Sheets data as soon as the app opens — no manual click needed.
+  // The Data Input tab (and this URL field) stays reachable afterwards for manual
+  // re-fetching, CSV upload, or troubleshooting; nothing here disables or hides it.
+  useEffect(()=>{ loadSheets(); },[]);
+
   return(
     <div style={{maxWidth:900}}>
       <div style={{marginBottom:14}}>
@@ -1087,6 +1124,36 @@ function SBar({settings,setSettings,t,isTop}){
   useEffect(()=>setLocal(settings),[settings]);
   const onMove=(k,v)=>setLocal(p=>({...p,[k]:v}));
   const onRelease=(k,v)=>setSettings(p=>({...p,[k]:v}));
+  const[showInfo,setShowInfo]=useState(false);
+  const[popoverPos,setPopoverPos]=useState({top:0,left:0});
+  const infoRef=useRef(null);
+  const popoverRef=useRef(null);
+  useEffect(()=>{
+    if(!showInfo) return;
+    const onDocClick=e=>{
+      if(infoRef.current?.contains(e.target)) return;
+      if(popoverRef.current?.contains(e.target)) return;
+      setShowInfo(false);
+    };
+    document.addEventListener("mousedown",onDocClick);
+    return()=>document.removeEventListener("mousedown",onDocClick);
+  },[showInfo]);
+  // The settings bar has overflow:hidden, so a normal absolutely-positioned popover
+  // gets clipped by it. Instead, render the popover into document.body (portal) with
+  // fixed positioning computed from the icon's actual screen location — placed to
+  // its right, flipping to the left if it would run off the right edge of the window.
+  function toggleInfo(){
+    if(!showInfo && infoRef.current){
+      const rect = infoRef.current.getBoundingClientRect();
+      const width = 300;
+      const overflowsRight = rect.right + 10 + width > window.innerWidth;
+      setPopoverPos({
+        top: rect.top + rect.height/2,
+        left: overflowsRight ? rect.left - 10 - width : rect.right + 10,
+      });
+    }
+    setShowInfo(v=>!v);
+  }
   const sliders=[
     ["totalLeadTime","Additional Lead Time",0,60,"d","Extra buffer days added on top of Excel lead time (default 0)"],
     ["safetyDays","Safety Stock",0,100,"d","Trigger reorder when remaining stock falls below this many days"],
@@ -1106,13 +1173,8 @@ function SBar({settings,setSettings,t,isTop}){
           </div>
         ))}
       </div>
-      <div className="sbar-info">
-        Reorder Point: <strong>Sea LT + {local.safetyDays}d safety</strong>
-        &nbsp;·&nbsp; Additional Delay: <strong>+{local.totalLeadTime}d</strong>
-        &nbsp;·&nbsp; Target FBA: <strong>{local.fbaCoverDays}d cover</strong>
-        &nbsp;·&nbsp; Demand: weighted avg (7d×0.5 + 14d×0.3 + 30d×0.2)
-        &nbsp;·&nbsp;
-        <label style={{cursor:"pointer",userSelect:"none"}}>
+      <div className="sbar-info" style={{display:"flex",alignItems:"center",flexWrap:"wrap"}}>
+        <label style={{cursor:"pointer",userSelect:"none",display:"inline-flex",alignItems:"center"}}>
           <input type="checkbox"
             checked={local.inclFBA!==false}
             onChange={e=>{const v=e.target.checked;onMove("inclFBA",v);onRelease("inclFBA",v);}}
@@ -1120,7 +1182,7 @@ function SBar({settings,setSettings,t,isTop}){
           />Include FBA
         </label>
         &nbsp;&nbsp;
-        <label style={{cursor:"pointer",userSelect:"none"}}>
+        <label style={{cursor:"pointer",userSelect:"none",display:"inline-flex",alignItems:"center"}}>
           <input type="checkbox"
             checked={local.inclTransfer!==false}
             onChange={e=>{const v=e.target.checked;onMove("inclTransfer",v);onRelease("inclTransfer",v);}}
@@ -1128,7 +1190,7 @@ function SBar({settings,setSettings,t,isTop}){
           />Include FC Transfer
         </label>
         &nbsp;&nbsp;
-        <label style={{cursor:"pointer",userSelect:"none"}}>
+        <label style={{cursor:"pointer",userSelect:"none",display:"inline-flex",alignItems:"center"}}>
           <input type="checkbox"
             checked={local.inclFC!==false}
             onChange={e=>{const v=e.target.checked;onMove("inclFC",v);onRelease("inclFC",v);}}
@@ -1136,7 +1198,7 @@ function SBar({settings,setSettings,t,isTop}){
           />Include FC
         </label>
         &nbsp;&nbsp;
-        <label style={{cursor:"pointer",userSelect:"none"}}>
+        <label style={{cursor:"pointer",userSelect:"none",display:"inline-flex",alignItems:"center"}}>
           <input type="checkbox"
             checked={local.inclInbound!==false}
             onChange={e=>{const v=e.target.checked;onMove("inclInbound",v);onRelease("inclInbound",v);}}
@@ -1144,13 +1206,41 @@ function SBar({settings,setSettings,t,isTop}){
           />Include Inbound
         </label>
         &nbsp;&nbsp;
-        <label style={{cursor:"pointer",userSelect:"none"}} title="Forecast-only: adds Purchased Units + open PO qty to stock for DOI / Stockout Date / the forecast chart. Does not affect purchase suggestions or actual stock figures.">
+        <label style={{cursor:"pointer",userSelect:"none",display:"inline-flex",alignItems:"center"}} title="Forecast-only: adds Purchased Units + open PO qty to stock for DOI / Stockout Date / the forecast chart. Does not affect purchase suggestions or actual stock figures.">
           <input type="checkbox"
             checked={local.inclPO===true}
             onChange={e=>{const v=e.target.checked;onMove("inclPO",v);onRelease("inclPO",v);}}
             style={{marginRight:4,accentColor:"currentColor"}}
           />Include PO (forecast)
         </label>
+        <span ref={infoRef} style={{position:"relative",display:"inline-flex",alignItems:"center",marginLeft:8}}>
+          <span
+            onClick={toggleInfo}
+            title={`Reorder Point: Sea LT + ${local.safetyDays}d safety · Additional Delay: +${local.totalLeadTime}d · Target FBA: ${local.fbaCoverDays}d cover · Demand: weighted avg (7d×0.5 + 14d×0.3 + 30d×0.2)`}
+            style={{
+              display:"inline-flex",alignItems:"center",justifyContent:"center",
+              boxSizing:"border-box",width:16,height:16,lineHeight:1,borderRadius:"50%",
+              cursor:"pointer",userSelect:"none",
+              fontSize:10,fontWeight:700,color:t.text3,border:`1px solid ${t.border2}`,
+              background:showInfo?t.accentBg:"transparent",
+            }}
+          >i</span>
+        </span>
+        {showInfo&&createPortal(
+          <div ref={popoverRef} style={{
+            position:"fixed",top:popoverPos.top,left:popoverPos.left,transform:"translateY(-50%)",zIndex:9999,
+            width:300,padding:"10px 12px",borderRadius:8,
+            background:t.tooltipBg,border:`1px solid ${t.border}`,
+            boxShadow:"0 4px 16px rgba(0,0,0,.18)",fontSize:10,lineHeight:1.7,color:t.text2,
+            whiteSpace:"normal",
+          }}>
+            Reorder Point: <strong style={{color:t.text}}>Sea LT + {local.safetyDays}d safety</strong><br/>
+            Additional Delay: <strong style={{color:t.text}}>+{local.totalLeadTime}d</strong><br/>
+            Target FBA: <strong style={{color:t.text}}>{local.fbaCoverDays}d cover</strong><br/>
+            Demand: weighted avg (7d×0.5 + 14d×0.3 + 30d×0.2)
+          </div>,
+          document.body
+        )}
       </div>
     </div>
   );
@@ -1198,7 +1288,7 @@ function InventoryHealthBar({skus, t}) {
   );
 }
 
-function Dashboard({data,settings,setSettings,onSku,t}){
+function Dashboard({data,settings,setSettings,onSku,t,purchRows}){
   const skus=Object.values(data);
   const crit=skus.filter(d=>d.planning.priority==="critical").length;
   const high=skus.filter(d=>d.planning.priority==="high").length;
@@ -1206,6 +1296,11 @@ function Dashboard({data,settings,setSettings,onSku,t}){
   const totalStock=skus.reduce((s,d)=>s+d.currentStock,0);
   const totalDemand=skus.reduce((s,d)=>s+d.velocity.demand,0);
   const withFC=skus.filter(d=>d.hasFCData).length;
+  const openPoCount=useMemo(()=>{
+    if(!purchRows||!purchRows.length) return 0;
+    const get=makeGet(purchRows);
+    return purchRows.filter(r=>s(r,get,"Status","status").toLowerCase().trim()!=="delivered").length;
+  },[purchRows]);
 
   const [alertSort,setAlertSort]=useState({col:"score",dir:"desc"});
 
@@ -1263,6 +1358,7 @@ function Dashboard({data,settings,setSettings,onSku,t}){
         {l:"High Priority", v:high,                s:"Purchase required",  c:"y"},
         {l:"Overstock",     v:over,                s:"Excess inventory",   c:"p"},
         {l:"FC Coverage",   v:withFC,              s:"ASINs with ledger",  c:"b"},
+        {l:"Open PO's",     v:openPoCount,         s:"Not yet delivered",  c:"b"},
       ].map(k=>(
         <div key={k.l} className={`kc ${k.c}`}>
           <div className="kl">{k.l}</div>
@@ -1397,6 +1493,39 @@ function AllSKUs({data,settings,setSettings,onSku,t}){
     });
   },[data,q,sort,fil]);
 
+  // Export what's currently on screen (search + filter applied) as CSV.
+  // Stock/FBA/FC/FC Transfer/Inbound columns are zeroed to "-" when their
+  // "Include ___" checkbox is off, so the export matches what's actually
+  // driving DOI/Stockout Date/Buy Qty below — those already reflect the
+  // toggles via the planning engine and are exported unchanged.
+  function exportCSV(){
+    const inclFBA = settings.inclFBA !== false;
+    const inclFC = settings.inclFC !== false;
+    const inclInbound = settings.inclInbound !== false;
+    const inclTransfer = settings.inclTransfer !== false;
+    const headers = ["SKU Name","Seller SKU","ASIN","Trend","W.Demand/Day","Stock","FBA","FC","FC Transfer","Inbound","DOI (days)","Stockout Date","Buy Qty","Replenish Qty","Action","Priority"];
+    const rows = skus.map(d=>{
+      const stock = (inclFBA?d.fbaAvailable||0:0) + (inclTransfer?d.fcTransfer||0:0) + (inclFC?d.fcSellable||0:0) + (inclInbound?(d.inbound||0)+(d.processing||0)*0.8:0);
+      return [
+        d.finalName, d.sellerSku, d.asin,
+        calcTrend(d.velocity.avg7, d.velocity.avg30),
+        fmt(d.velocity.demand,2),
+        fmt(Math.round(stock)),
+        inclFBA ? fmt(d.fbaAvailable) : "-",
+        inclFC ? fmt(d.fcSellable) : "-",
+        inclTransfer ? fmt(d.fcTransfer) : "-",
+        inclInbound ? fmt(d.inbound) : "-",
+        isFinite(d.planning.doi) ? fmt(d.planning.doi,1) : "∞",
+        fmtDate(d.planning.stockoutDate),
+        d.planning.suggestedPurchase>0 ? fmt(d.planning.suggestedPurchase) : "-",
+        d.planning.replenishQty>0 ? fmt(d.planning.replenishQty) : "-",
+        d.planning.action||"OK",
+        d.planning.priority||"",
+      ];
+    });
+    downloadCSV(`all_skus_${localKey(getToday())}.csv`, headers, rows);
+  }
+
   return(<div>
     <SBar settings={settings} setSettings={setSettings} t={t}/>
     <div className="card">
@@ -1406,6 +1535,9 @@ function AllSKUs({data,settings,setSettings,onSku,t}){
           <option value="all">All SKUs</option><option value="critical">Critical</option>
           <option value="high">High Priority</option><option value="ok">OK</option><option value="over">Overstock</option>
         </select>
+        <button className="btn bs" style={{fontSize:11}} onClick={exportCSV} title="Exports the rows currently shown, with columns reflecting the Include FBA/FC/Transfer/Inbound toggles above">
+          ⬇ Export CSV
+        </button>
         {picked.size>0&&<span style={{fontSize:9,color:t.accent,fontFamily:"'Inter',system-ui,sans-serif",fontWeight:700}}>{picked.size} selected</span>}
         {picked.size>0&&<button className="btn bs" style={{fontSize:10,padding:"4px 9px"}} onClick={()=>setPicked(new Set())}>Deselect All</button>}
         <span style={{marginLeft:"auto",fontSize:9,color:t.text3,fontFamily:"'Inter',system-ui,sans-serif"}}>{skus.length}/{Object.keys(data).length}</span>
@@ -2434,20 +2566,34 @@ function TopCities({ citySales, t }) {
 
   const sorted = [...entries].sort((a,b) => b.qty - a.qty);
   const TOP_N = 15;
-  const top = sorted.slice(0, TOP_N);
-  const rest = sorted.slice(TOP_N);
+  // City eligibility pool: named cities beyond this rank get aggregated into
+  // "Other [State]" buckets before ranking — keeps the long tail from being
+  // hundreds of 1-2 unit rows, without hiding genuinely large buckets from
+  // the top 15 (see below: buckets re-enter the ranking alongside named cities).
+  const CITY_POOL = 60;
+  const cityCandidates = sorted.slice(0, CITY_POOL);
+  const smallCities = sorted.slice(CITY_POOL);
 
-  // Group rest by state → "Other [State]" buckets
+  // Group the long tail by state → "Other [State]" buckets
   const otherByState = {};
-  rest.forEach(e => {
+  smallCities.forEach(e => {
     const k = "Other " + e.stateLabel;
     if (!otherByState[k]) otherByState[k] = { city: k, stateLabel: e.stateLabel, qty: 0, isOther: true };
     otherByState[k].qty += e.qty;
   });
-  const otherRows = Object.values(otherByState).sort((a,b) => b.qty - a.qty);
+  const otherBuckets = Object.values(otherByState);
+
+  // Rank named cities and "Other [State]" buckets together — a big Other bucket
+  // (e.g. lots of small towns in one state) can legitimately outrank a small
+  // named city, and should show up in the top 15 rather than always being
+  // pushed into the collapsed section regardless of size.
+  const combined = [...cityCandidates, ...otherBuckets].sort((a,b) => b.qty - a.qty);
+  const top = combined.slice(0, TOP_N);
+  const rest = combined.slice(TOP_N);
+  const otherRows = rest; // kept name for the collapsible section below
   const hasRest = otherRows.length > 0;
 
-  // Always show top 15; show "Other" groups only when expanded
+  // Always show top 15; show the rest only when expanded
   const visibleRows = expanded ? [...top, ...otherRows] : top;
   const maxQty = top[0]?.qty || 1;
 
@@ -2497,12 +2643,12 @@ function TopCities({ citySales, t }) {
     <div>
       {/* Legend */}
       <div style={{fontSize:9,color:t.text3,fontFamily:"'Inter',system-ui,sans-serif",marginBottom:10}}>
-        Top {top.length} cities · {hasRest ? `${otherRows.length} state group${otherRows.length>1?"s":""} collapsed below · ` : ""}total {fmt(totalQty)} units
+        Top {top.length} (cities and state groups, ranked together) · {hasRest ? `${otherRows.length} more collapsed below · ` : ""}total {fmt(totalQty)} units
       </div>
 
       {/* Top 15 rows — always visible */}
       <div style={{display:"flex",flexDirection:"column",gap:5}}>
-        {top.map((row, i) => <CityRow key={row.city+i} row={row} rank={i} isOther={false}/>)}
+        {top.map((row, i) => <CityRow key={row.city+i} row={row} rank={i} isOther={!!row.isOther}/>)}
       </div>
 
       {/* Collapsible rest */}
@@ -2524,14 +2670,14 @@ function TopCities({ citySales, t }) {
               fontSize:10,
             }}>▶</span>
             <span>
-              {expanded ? "Hide" : "Show"} remaining {otherRows.length} state group{otherRows.length>1?"s":""} &nbsp;·&nbsp; {fmt(rest.reduce((s,e)=>s+e.qty,0))} units ({(rest.reduce((s,e)=>s+e.qty,0)/totalQty*100).toFixed(1)}% of demand)
+              {expanded ? "Hide" : "Show"} remaining {otherRows.length} {otherRows.length===1?"entry":"entries"} &nbsp;·&nbsp; {fmt(rest.reduce((s,e)=>s+e.qty,0))} units ({(rest.reduce((s,e)=>s+e.qty,0)/totalQty*100).toFixed(1)}% of demand)
             </span>
           </div>
 
           {expanded && (
             <div style={{display:"flex",flexDirection:"column",gap:5,marginTop:6,
               paddingLeft:8, borderLeft:`2px solid ${t.border}`}}>
-              {otherRows.map((row, i) => <CityRow key={row.city+i} row={row} rank={top.length+i} isOther={true}/>)}
+              {otherRows.map((row, i) => <CityRow key={row.city+i} row={row} rank={top.length+i} isOther={!!row.isOther}/>)}
             </div>
           )}
         </div>
@@ -2540,7 +2686,7 @@ function TopCities({ citySales, t }) {
   );
 }
 
-function SKUDetail({sku, onBack, settings, setSettings, t, poUnits, setPoUnits, purchRows, skuCfg, setSkuCfg}){
+function SKUDetail({sku, onBack, settings, setSettings, t, poUnits, setPoUnits, purchRows, skuCfg, setSkuCfg, extraInbound, setExtraInbound, poSelection, togglePoSelection}){
   if(!sku) return null;
   const {velocity:vel, planning:pl, forecast:baseForecast, forecastWithPO, fcPlanning, hasFCData, regionalSales, citySales, salesHistory} = sku;
   // "Include PO (forecast)" toggle — display-only swap, all underlying purchase/replenish logic untouched
@@ -2571,50 +2717,81 @@ function SKUDetail({sku, onBack, settings, setSettings, t, poUnits, setPoUnits, 
   const effectiveLT = seaLTBase != null ? (defaultLT + ltAdj + settings.totalLeadTime) : (defaultLT + ltAdj);
   const effectiveAirLT = airLTBase != null ? airLTBase + ltAdj + settings.totalLeadTime : null;
 
-  // Recompute local planning values with per-SKU LTs + adjustment
-  const localReorderStock = Math.round(vel.demand * (effectiveLT + settings.safetyDays));
-  const localDoi = vel.demand > 0 ? (sku.currentStock / vel.demand) : Infinity;
+  // Recompute local planning values with per-SKU LTs + adjustment.
+  // Uses sku.effectiveDemand (weighted avg, or the Priority Demand override if one is
+  // set) — the SAME demand basis the KPI tiles/planning engine use above. Previously
+  // this recompute used the raw weighted average (vel.demand) regardless of any
+  // Priority Demand override, which could make this section (and Shipment Plan below)
+  // show "stock OK" while the KPI tiles above correctly showed real urgency.
+  const demand = sku.effectiveDemand;
+  const localReorderStock = Math.round(demand * (effectiveLT + settings.safetyDays));
+  const localDoi = demand > 0 ? (sku.currentStock / demand) : Infinity;
   const localGap = Math.max(0, (effectiveLT + settings.safetyDays) - localDoi);
-  const localRequired = vel.demand * (effectiveLT + settings.safetyDays);
-  const localSuggestedPurchaseRaw = Math.round(Math.max(0, localGap) * vel.demand);
+  const localRequired = demand * (effectiveLT + settings.safetyDays);
+  const localSuggestedPurchaseRaw = Math.round(Math.max(0, localGap) * demand);
   const currentPoUnits = poUnits?.[sku.asin] ?? 0;
-  // Auto-fetched open POs from Purchases sheet (non-Delivered, this ASIN)
+  // Auto-fetched open POs from Purchases sheet (non-Delivered, this ASIN).
+  // poNo numbering matches buildOpenPoMap's so checkbox state lines up with the global engine.
   const skuPoRows = (purchRows||[]).filter(r=>{
     const get = makeGet([r]);
     const asin   = s(r,get,"ASIN","asin");
     const status = s(r,get,"Status","status").toLowerCase().trim();
     return asin === sku.asin && status !== "delivered";
-  });
-  const totalOpenPoQty = skuPoRows.reduce((sum,r)=>{
+  }).map((r,i)=>{
     const get = makeGet([r]);
-    return sum + Math.max(0, n(r,get,"Tr Qty","tr qty","Qty","qty","Quantity","quantity")||0);
-  },0);
+    const rowKey = i+1; // matches buildOpenPoMap's per-asin row position — unique even if PO Numbers repeat
+    const poNo = s(r,get,"PO No","po no","PO Number","po_number","order_id") || `PO-${rowKey}`;
+    const qty = Math.max(0, n(r,get,"Tr Qty","tr qty","Qty","qty","Quantity","quantity")||0);
+    const included = poSelection?.[sku.asin]?.[rowKey] !== false;
+    return { row:r, rowKey, poNo, qty, included };
+  });
+  const totalOpenPoQty = skuPoRows.reduce((sum,pr)=>sum+(pr.included?pr.qty:0),0);
   const totalPoDeduction = currentPoUnits + totalOpenPoQty;
   const localSuggestedPurchase = Math.max(0, localSuggestedPurchaseRaw - totalPoDeduction);
   const fullyCoveredByPos = localSuggestedPurchaseRaw > 0 && localSuggestedPurchase === 0 && totalPoDeduction > 0;
-  // ── Shipment split — scenario-based ──
-  // doi in days from anchor; how long stock lasts
-  const stockDaysLeft = isFinite(localDoi) ? localDoi : effectiveLT + 999;
   const hasAir = effectiveAirLT != null && effectiveAirLT > 0;
 
-  // Scenario 1: stock lasts past sea arrival → all SEA, no air
-  // Scenario 2: stock lasts past air arrival but not sea → SEA now (full), no air yet
-  // Scenario 3: stock runs out before sea arrives → bridge gap with air
-  //   gap = days between air_arrival and sea_arrival = effectiveLT - effectiveAirLT
-  //   air covers that gap window of sales
-  // Scenario 4: stock runs out before even air arrives → all must be air (crisis)
-
-  let localAirQty = 0;
-  let localSeaQty = localSuggestedPurchase;
-  let splitScenario = 1; // 1=all sea, 3=split (air bridges shortfall), 4=crisis air
-
-  if (localSuggestedPurchase > 0 && vel.demand > 0 && hasAir) {
-    const shortfallDays = Math.max(0, effectiveLT - Math.max(stockDaysLeft, effectiveAirLT)); // air only covers airLT->seaLT window
-    const airBridgeQty = Math.ceil(shortfallDays * vel.demand);
-    localAirQty = Math.min(airBridgeQty, localSuggestedPurchase);
-    localSeaQty = Math.max(0, localSuggestedPurchase - localAirQty);
-    splitScenario = stockDaysLeft < 0 ? 4 : (localAirQty > 0 ? 3 : 1);
+  // ── Shipment plan — adapted from Procurement Forecast's logic ──
+  // Air = gap-fill only: just enough to survive until the sea shipment arrives.
+  // Sea = the full replenishment target for the whole (lead time + safety) cycle,
+  // independent of air, with air's contribution and open POs subtracted so nothing
+  // is double-counted. This intentionally does NOT split one combined total into
+  // two pieces — air and sea answer two different questions, so they're allowed
+  // to look like two different-sized numbers. Lead times are effectiveLT/effectiveAirLT
+  // (sheet lead time + the Additional Lead Time slider), matching the rest of this page.
+  // Stock + already-placed PO units (manual "Purchased Units" + checked open POs) —
+  // both the "will I stock out before sea arrives" check and the sea target need to
+  // treat incoming PO the same way, otherwise air can fire a "bridge the gap" order
+  // that's already covered by a PO the sea math already counted as available.
+  const shipAvailableStock = sku.currentStock + totalPoDeduction;
+  const shipDoh = demand > 0 ? shipAvailableStock / demand : Infinity;
+  let shipOrderAir = 0;
+  if (hasAir && demand > 0) {
+    if (isFinite(shipDoh) && shipDoh < effectiveLT) {
+      const gapDays = Math.max(0, effectiveLT - shipDoh);
+      shipOrderAir = Math.max(0, Math.round(gapDays * demand));
+    }
   }
+  let shipOrderSea = 0;
+  if (demand > 0) {
+    const targetUnits = demand * (effectiveLT + settings.safetyDays);
+    shipOrderSea = Math.max(0, Math.round(targetUnits - shipAvailableStock - shipOrderAir));
+  }
+  const shipAirArrivalDate = hasAir ? new Date((sku._anchor||new Date()).getTime() + effectiveAirLT*86400000) : null;
+  const shipSeaArrivalDate = new Date((sku._anchor||new Date()).getTime() + effectiveLT*86400000);
+  const shipStockoutDate = demand > 0 && isFinite(shipDoh)
+    ? new Date((sku._anchor||new Date()).getTime() + shipDoh*86400000) : null;
+  const shipReorderDate = shipStockoutDate
+    ? new Date(shipStockoutDate.getTime() - effectiveLT*86400000) : null;
+
+  let shipStatusLabel, shipStatusTier;
+  if (demand === 0 && sku.currentStock === 0) { shipStatusLabel = "No sales data"; shipStatusTier = "none"; }
+  else if (sku.currentStock === 0 && demand > 0) { shipStatusLabel = "Stocked out — order air"; shipStatusTier = "critical"; }
+  else if (hasAir && isFinite(shipDoh) && shipDoh < effectiveAirLT) { shipStatusLabel = "Order air now"; shipStatusTier = "critical"; }
+  else if (isFinite(shipDoh) && shipDoh < effectiveLT) { shipStatusLabel = "Sea + air gap order"; shipStatusTier = "urgent"; }
+  else if (isFinite(shipDoh) && shipDoh < effectiveLT * 1.3) { shipStatusLabel = "Place sea order soon"; shipStatusTier = "soon"; }
+  else if (demand > 0) { shipStatusLabel = "Stock OK — routine sea"; shipStatusTier = "ok"; }
+  else { shipStatusLabel = "No sales data"; shipStatusTier = "none"; }
 
   // ── FC manual inbound overrides (persisted to localStorage, keyed asin::fc) ──
   const [fcInbound, setFcInbound] = useState(()=>{
@@ -2637,50 +2814,21 @@ function SKUDetail({sku, onBack, settings, setSettings, t, poUnits, setPoUnits, 
   const reorderStock = localReorderStock;
   const FC_STATUS_COLOR = {stockout:t.red,critical:t.red,low:t.yellow,ok:t.green,surplus:t.purple};
 
-  // ── Order deadline dates ──
   const anchor = sku._anchor || new Date();
-  const stockoutMs = vel.demand > 0 && isFinite(localDoi)
-    ? anchor.getTime() + localDoi * 86400000 : null;
-  const seaArrivalDate = stockoutMs != null
-    ? new Date(anchor.getTime() + effectiveLT * 86400000) : null;
-  const airArrivalDate = hasAir && stockoutMs != null
-    ? new Date(anchor.getTime() + effectiveAirLT * 86400000) : null;
-  // Last safe date = stockout - transit (can be past = overdue)
-  const seaOrderByDate = stockoutMs != null && effectiveLT > 0
-    ? new Date(stockoutMs - effectiveLT * 86400000) : null;
-  const airOrderByDate = hasAir && stockoutMs != null
-    ? new Date(stockoutMs - effectiveAirLT * 86400000) : null;
-
   function daysFromAnchor(d) {
     if (!d) return null;
     return Math.round((d.getTime() - anchor.getTime()) / 86400000);
   }
-  function deadlineColor(daysLeft) {
-    if (daysLeft == null) return t.text3;
-    if (daysLeft < 0)  return t.red;
-    if (daysLeft < 14) return t.orange;
-    return t.green;
+  const shipReorderDaysLeft = daysFromAnchor(shipReorderDate);
+  const shipReorderPast = shipReorderDaysLeft != null && shipReorderDaysLeft < 0;
+  const shipReorderSoon = shipReorderDaysLeft != null && !shipReorderPast && shipReorderDaysLeft < 10;
+  function shipStatusColor(tier) {
+    if (tier === "critical") return t.red;
+    if (tier === "urgent")   return t.orange;
+    if (tier === "soon")     return t.yellow;
+    if (tier === "ok")       return t.green;
+    return t.text3;
   }
-  function deadlineLabel(d) {
-    if (!d) return "—";
-    const dl = daysFromAnchor(d);
-    const ds = fmtDate(d);
-    if (dl < 0)   return `${ds} (${Math.abs(dl)}d overdue)`;
-    if (dl === 0) return `${ds} (TODAY)`;
-    return `${ds} (in ${dl}d)`;
-  }
-
-  const seaDaysLeft = daysFromAnchor(seaOrderByDate);
-  const airDaysLeft = daysFromAnchor(airOrderByDate);
-  const seaArrivalDaysLeft = daysFromAnchor(seaArrivalDate);
-  const airArrivalDaysLeft = daysFromAnchor(airArrivalDate);
-
-  const SCENARIO_MSG = {
-    1: null,
-    2: {color:t.orange, msg:`SEA deadline is urgent — stock lasts until air arrival but place SEA order now`},
-    3: {color:t.red,    msg:`Stock runs out before SEA arrives — Air bridges the ${effectiveLT - (effectiveAirLT??0)}d gap`},
-    4: {color:t.red,    msg:`Already stocked out — order all units by Air immediately`},
-  };
 
   return(<div>
     <div className="bk" onClick={onBack} style={{
@@ -2748,165 +2896,13 @@ function SKUDetail({sku, onBack, settings, setSettings, t, poUnits, setPoUnits, 
       {[
         {l:"Days of Inventory",v:isFinite(displayDoi)?`${fmt(displayDoi,1)}d`:"∞",col:displayDoi<7?t.red:displayDoi<21?t.yellow:t.green},
         {l:"Stockout Date",v:fmtDate(displayStockoutDate),col:displayDoi<7?t.red:displayDoi<21?t.yellow:t.text},
-        {l:"Gross Requirement",v:fmt(pl.netRequirement),col:pl.netRequirement>0?t.red:t.green},
+        {l:"Weighted Demand",v:fmt(vel.demand,2)+"/day",col:t.accent},
       ].map(k=>(
         <div key={k.l} className="kc">
           <div className="kl">{k.l}</div>
           <div className="kv" style={{fontSize:16,color:k.col}}>{k.v}</div>
         </div>
       ))}
-    </div>
-
-    {/* Order Deadlines — shipment split */}
-    <div className="card" style={{marginBottom:10}}>
-      <div className="ch">Shipment Plan — Order Deadlines &amp; Split</div>
-      {vel.demand === 0 ? (
-        <div style={{fontSize:11,color:t.text3,fontFamily:"'Inter',system-ui,sans-serif",padding:"6px 0"}}>No demand — not applicable</div>
-      ) : !stockoutMs ? (
-        <div style={{fontSize:11,color:t.text3,fontFamily:"'Inter',system-ui,sans-serif",padding:"6px 0"}}>Infinite stock — no order needed</div>
-      ) : (
-        <div>
-          {/* Scenario banner */}
-          {SCENARIO_MSG[splitScenario] && (
-            <div style={{
-              marginBottom:10,padding:"8px 12px",borderRadius:7,fontSize:11,fontWeight:600,
-              background:SCENARIO_MSG[splitScenario].color+"18",
-              border:`1px solid ${SCENARIO_MSG[splitScenario].color}44`,
-              color:SCENARIO_MSG[splitScenario].color,
-            }}>
-              ⚠ {SCENARIO_MSG[splitScenario].msg}
-            </div>
-          )}
-
-          <div style={{display:"grid",gridTemplateColumns:hasAir?"1fr 1fr":"1fr",gap:10,marginBottom:10}}>
-
-            {/* SEA card */}
-            <div style={{
-              padding:"12px 14px",borderRadius:8,
-              background: splitScenario===4 ? t.surface2 : deadlineColor(seaDaysLeft)+"14",
-              border:`1px solid ${splitScenario===4 ? t.border : deadlineColor(seaDaysLeft)+"55"}`,
-              opacity: splitScenario===4 ? 0.45 : 1,
-            }}>
-              <div style={{fontSize:13,fontWeight:600,color:t.text2,marginBottom:10}}>
-                🚢 Sea Shipment
-              </div>
-              {/* Order by date */}
-              <div style={{marginBottom:6}}>
-                <div style={{fontSize:9,color:t.text3,marginBottom:2}}>ORDER BY</div>
-                <div style={{fontSize:14,fontWeight:700,fontFamily:"'Inter',system-ui,sans-serif",color:splitScenario===4?t.text3:deadlineColor(seaDaysLeft)}}>
-                  {splitScenario===4 ? "N/A — order all by Air" : deadlineLabel(seaOrderByDate)}
-                </div>
-              </div>
-              {/* Arrival date */}
-              {seaArrivalDate && splitScenario!==4 && (
-                <div style={{marginBottom:6}}>
-                  <div style={{fontSize:9,color:t.text3,marginBottom:2}}>ARRIVES ~</div>
-                  <div style={{fontSize:11,fontFamily:"'Inter',system-ui,sans-serif",color:t.text2}}>
-                    {fmtDate(seaArrivalDate)}
-                    {seaArrivalDaysLeft!=null&&<span style={{color:t.text3,fontSize:9}}> (in {seaArrivalDaysLeft}d)</span>}
-                  </div>
-                </div>
-              )}
-              {/* Units */}
-              <div style={{
-                marginTop:8,padding:"7px 10px",borderRadius:6,
-                background:t.surface2,border:`1px solid ${t.border}`,
-                display:"flex",justifyContent:"space-between",alignItems:"center",
-              }}>
-                <span style={{fontSize:12,color:t.text3}}>Order Qty</span>
-                <span style={{fontSize:16,fontWeight:800,fontFamily:"'Inter',system-ui,sans-serif",color:splitScenario===4?t.text3:t.green}}>
-                  {splitScenario===4 ? "—" : fmt(localSeaQty)} <span style={{fontSize:10,fontWeight:400}}>units</span>
-                </span>
-              </div>
-              {effectiveLT>0&&splitScenario!==4&&(
-                <div style={{marginTop:5,fontSize:9,color:t.text3,fontFamily:"'Inter',system-ui,sans-serif"}}>
-                  {effectiveLT}d transit · covers long-term stock
-                </div>
-              )}
-            </div>
-
-            {/* AIR card — only if air LT exists */}
-            {hasAir && (
-              <div style={{
-                padding:"12px 14px",borderRadius:8,
-                background: (splitScenario===3||splitScenario===4) ? deadlineColor(airDaysLeft)+"14" : t.surface2,
-                border:`1px solid ${(splitScenario===3||splitScenario===4) ? deadlineColor(airDaysLeft)+"55" : t.border}`,
-                opacity: splitScenario===1 ? 0.4 : 1,
-              }}>
-                <div style={{fontSize:13,fontWeight:600,color:t.text2,marginBottom:10}}>
-                  ✈ Air Shipment {splitScenario===1&&<span style={{color:t.text3,fontWeight:400}}>(not needed)</span>}
-                </div>
-                {/* Order by date */}
-                <div style={{marginBottom:6}}>
-                  <div style={{fontSize:9,color:t.text3,marginBottom:2}}>ORDER BY</div>
-                  <div style={{fontSize:14,fontWeight:700,fontFamily:"'Inter',system-ui,sans-serif",color:splitScenario===1?t.text3:deadlineColor(airDaysLeft)}}>
-                    {splitScenario===1 ? "Not required" : deadlineLabel(airOrderByDate)}
-                  </div>
-                </div>
-                {/* Arrival */}
-                {airArrivalDate && splitScenario!==1 && (
-                  <div style={{marginBottom:6}}>
-                    <div style={{fontSize:9,color:t.text3,marginBottom:2}}>ARRIVES ~</div>
-                    <div style={{fontSize:11,fontFamily:"'Inter',system-ui,sans-serif",color:t.text2}}>
-                      {fmtDate(airArrivalDate)}
-                      {airArrivalDaysLeft!=null&&<span style={{color:t.text3,fontSize:9}}> (in {airArrivalDaysLeft}d)</span>}
-                    </div>
-                  </div>
-                )}
-                {/* Units */}
-                <div style={{
-                  marginTop:8,padding:"7px 10px",borderRadius:6,
-                  background:t.surface2,border:`1px solid ${t.border}`,
-                  display:"flex",justifyContent:"space-between",alignItems:"center",
-                }}>
-                  <span style={{fontSize:12,color:t.text3}}>Order Qty</span>
-                  <span style={{fontSize:16,fontWeight:800,fontFamily:"'Inter',system-ui,sans-serif",color:splitScenario===1?t.text3:t.accent}}>
-                    {splitScenario===1 ? "—" : fmt(localAirQty)} <span style={{fontSize:10,fontWeight:400}}>units</span>
-                  </span>
-                </div>
-                {splitScenario===3&&(
-                  <div style={{marginTop:5,fontSize:9,color:t.text3,fontFamily:"'Inter',system-ui,sans-serif"}}>
-                    {effectiveAirLT}d transit · bridges {effectiveLT-(effectiveAirLT??0)}d gap until sea arrives
-                  </div>
-                )}
-                {splitScenario===4&&(
-                  <div style={{marginTop:5,fontSize:9,color:t.red,fontFamily:"'Inter',system-ui,sans-serif",fontWeight:600}}>
-                    Already stocked out — order all units now
-                  </div>
-                )}
-              </div>
-            )}
-          </div>
-
-          {/* Total summary row */}
-          {localSuggestedPurchase > 0 && (
-            <div style={{
-              padding:"8px 12px",background:t.surface2,borderRadius:7,border:`1px solid ${t.border}`,
-              display:"flex",gap:20,alignItems:"center",flexWrap:"wrap",
-              fontSize:11,fontFamily:"'Inter',system-ui,sans-serif",
-            }}>
-              <span style={{color:t.text3,fontSize:9,textTransform:"uppercase",letterSpacing:".5px"}}>Total Order</span>
-              <span>🚢 Sea: <strong style={{color:t.green}}>{fmt(localSeaQty)} u</strong></span>
-              {hasAir&&<span>✈ Air: <strong style={{color:localAirQty>0?t.accent:t.text3}}>{fmt(localAirQty)} u</strong></span>}
-              <span style={{marginLeft:"auto",fontWeight:800,color:t.text,fontSize:13}}>
-                = {fmt(localSuggestedPurchase)} units total
-              </span>
-              {currentPoUnits>0&&(
-                <span style={{fontSize:10,color:t.text3}}>
-                  ({fmt(currentPoUnits)} on PO, deducted)
-                </span>
-              )}
-            </div>
-          )}
-
-          {/* No LT data nudge */}
-          {effectiveLT === 0 && !hasAir && (
-            <div style={{marginTop:8,fontSize:10,color:t.text3,fontFamily:"'Inter',system-ui,sans-serif"}}>
-              Upload Leadtime CSV to enable split calculations.
-            </div>
-          )}
-        </div>
-      )}
     </div>
 
     {/* Inventory + Velocity */}
@@ -2963,10 +2959,14 @@ function SKUDetail({sku, onBack, settings, setSettings, t, poUnits, setPoUnits, 
             </div>
           ) : (
             <>
+              <div style={{fontSize:9,color:t.text3,marginBottom:6,fontFamily:"'Inter',system-ui,sans-serif"}}>
+                Uncheck a PO to exclude it from purchase/replenishment/DOI/stockout calculations everywhere in the app.
+              </div>
               <div className="tw" style={{marginBottom:8}}>
                 <table style={{width:"100%",borderCollapse:"collapse"}}>
                   <thead>
                     <tr>
+                      <th style={{width:32,padding:"0 12px",height:36,background:t.surface,borderBottom:`1px solid ${t.border}`}}></th>
                       {["PO Number","Status","Ordered Qty","Date","Del. Date"].map(h=>(
                         <th key={h} style={{padding:"0 12px",height:36,fontSize:12,fontWeight:600,color:t.text3,
                           background:t.surface,
@@ -2975,16 +2975,22 @@ function SKUDetail({sku, onBack, settings, setSettings, t, poUnits, setPoUnits, 
                     </tr>
                   </thead>
                   <tbody>
-                    {poRows.map((r,i)=>{
+                    {poRows.map((pr,i)=>{
+                      const r = pr.row;
                       const get  = makeGet([r]);
-                      const poNo = s(r,get,"PO No","po no","PO Number","po_number","order_id") || `PO-${i+1}`;
+                      const poNo = pr.poNo;
                       const st   = s(r,get,"Status","status");
-                      const qty  = n(r,get,"Tr Qty","tr qty","Qty","qty","Quantity","quantity");
+                      const qty  = pr.qty;
                       const date = s(r,get,"Date","date","Created Date","created_date","Order Date");
                       const del  = s(r,get,"Date of Delivery","date_of_delivery","Delivery Date","delivery_date","Date of Completion","date_of_completion");
                       const sc   = statusColor(st);
                       return (
-                        <tr key={i} style={{borderBottom:`1px solid ${t.border}`}}>
+                        <tr key={i} style={{borderBottom:`1px solid ${t.border}`,opacity:pr.included?1:.45}}>
+                          <td style={{padding:"7px 10px"}}>
+                            <input type="checkbox" checked={pr.included} onChange={()=>togglePoSelection(sku.asin,pr.rowKey)}
+                              title={pr.included?"Included in calculations":"Excluded from calculations"}
+                              style={{cursor:"pointer"}}/>
+                          </td>
                           <td style={{padding:"7px 10px",fontSize:11,fontFamily:"'Inter',system-ui,sans-serif",color:t.text,fontWeight:600,textAlign:"left"}}>{poNo}</td>
                           <td style={{padding:"7px 10px",textAlign:"left"}}>
                             <span style={{
@@ -3008,7 +3014,7 @@ function SKUDetail({sku, onBack, settings, setSettings, t, poUnits, setPoUnits, 
                 fontSize:11,fontFamily:"'Inter',system-ui,sans-serif",
               }}>
                 <span style={{color:t.text3,fontSize:9,textTransform:"uppercase",letterSpacing:".5px"}}>
-                  Total Open PO Qty ({poRows.length} PO{poRows.length!==1?"s":""})
+                  Total Open PO Qty ({poRows.filter(p=>p.included).length}/{poRows.length} PO{poRows.length!==1?"s":""} included)
                 </span>
                 <span style={{fontWeight:800,fontSize:15,color:t.accent}}>{fmt(totalOpenQty)} units</span>
               </div>
@@ -3018,9 +3024,82 @@ function SKUDetail({sku, onBack, settings, setSettings, t, poUnits, setPoUnits, 
       );
     })()}
 
+    {/* Shipment Plan — adapted from Procurement Forecast's air/sea logic */}
+    <div className="card" style={{marginBottom:10}}>
+      <div className="ch">Shipment Plan</div>
+      {demand === 0 ? (
+        <div style={{fontSize:11,color:t.text3,fontFamily:"'Inter',system-ui,sans-serif",padding:"6px 0"}}>No demand — not applicable</div>
+      ) : (
+        <div>
+          {/* Single status line */}
+          <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:12}}>
+            <span style={{width:8,height:8,borderRadius:"50%",background:shipStatusColor(shipStatusTier),display:"inline-block",flexShrink:0}}></span>
+            <span style={{fontSize:14,fontWeight:700,color:shipStatusColor(shipStatusTier),fontFamily:"'Inter',system-ui,sans-serif"}}>{shipStatusLabel}</span>
+          </div>
+
+          <div style={{display:"grid",gridTemplateColumns:hasAir?"1fr 1fr":"1fr",gap:10,marginBottom:10}}>
+            {hasAir && (
+              <div style={{padding:"12px 14px",borderRadius:8,background:t.surface2,border:`1px solid ${t.border}`}}>
+                <div style={{fontSize:12,color:t.text3,marginBottom:6}}>✈ Air — bridge the gap</div>
+                <div style={{fontSize:20,fontWeight:800,fontFamily:"'Inter',system-ui,sans-serif",color:shipOrderAir>0?t.accent:t.text3}}>
+                  {shipOrderAir>0?fmt(shipOrderAir)+" units":"Not needed"}
+                </div>
+                {shipAirArrivalDate && shipOrderAir>0 && (
+                  <div style={{fontSize:10,color:t.text3,marginTop:4,fontFamily:"'Inter',system-ui,sans-serif"}}>
+                    Arrives {fmtDate(shipAirArrivalDate)}
+                  </div>
+                )}
+              </div>
+            )}
+            <div style={{padding:"12px 14px",borderRadius:8,background:t.surface2,border:`1px solid ${t.border}`}}>
+              <div style={{fontSize:12,color:t.text3,marginBottom:6}}>🚢 Sea — full cycle target</div>
+              <div style={{fontSize:20,fontWeight:800,fontFamily:"'Inter',system-ui,sans-serif",color:t.text}}>
+                {fmt(shipOrderSea)} units
+              </div>
+              <div style={{fontSize:10,color:t.text3,marginTop:4,fontFamily:"'Inter',system-ui,sans-serif"}}>
+                Arrives {fmtDate(shipSeaArrivalDate)}
+              </div>
+            </div>
+          </div>
+
+          {/* Reorder-by line */}
+          {shipReorderDate && (
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",borderTop:`1px solid ${t.border}`,paddingTop:10,fontSize:11}}>
+              <span style={{color:t.text3}}>Reorder by (sea)</span>
+              <span style={{fontWeight:600,color:shipReorderPast?t.red:shipReorderSoon?t.yellow:t.green,fontFamily:"'Inter',system-ui,sans-serif"}}>
+                {shipReorderPast&&"⚠ "}{fmtDate(shipReorderDate)}{shipReorderPast?" — past due":""}
+              </span>
+            </div>
+          )}
+
+          {/* No LT data nudge */}
+          {effectiveLT === 0 && !hasAir && (
+            <div style={{marginTop:8,fontSize:10,color:t.text3,fontFamily:"'Inter',system-ui,sans-serif"}}>
+              Upload Leadtime CSV to enable air/sea calculations.
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+
     {/* Recommended Actions */}
     <div className="card" style={{marginBottom:10}}>
       <div className="ch">Recommended Actions</div>
+      {/* Live DOI / Stockout Date / Still Need to Order — repeated here (not duplicating
+          the Gross Requirement tile below) so edits to Purchased Units / Priority Demand /
+          Add Inbound further down are visible without scrolling back up. */}
+      <div className="d4" style={{marginBottom:10,gridTemplateColumns:"repeat(3,1fr)"}}>
+        {[
+          {l:"Days of Inventory",v:isFinite(displayDoi)?`${fmt(displayDoi,1)}d`:"∞",col:displayDoi<7?t.red:displayDoi<21?t.yellow:t.green},
+          {l:"Stockout Date",v:fmtDate(displayStockoutDate),col:displayDoi<7?t.red:displayDoi<21?t.yellow:t.text},
+          {l:"Still Need to Order",v:localSuggestedPurchase>0?fmt(localSuggestedPurchase):"✓ Covered",col:localSuggestedPurchase>0?t.accent:t.green},
+        ].map(k=>(
+          <div key={k.l} className="kc">
+            <div className="kl">{k.l}</div>
+            <div className="kv" style={{fontSize:16,color:k.col}}>{k.v}</div>
+          </div>
+        ))}
+      </div>
       <div className="acs">
         {[{l:"Gross Requirement",v:fmt(localSuggestedPurchaseRaw),col:localSuggestedPurchaseRaw>0?t.red:t.green},
           {l:"FBA Replenishment Qty",v:fmt(pl.replenishQty),col:pl.replenishQty>0?t.yellow:t.green},
@@ -3089,6 +3168,32 @@ function SKUDetail({sku, onBack, settings, setSettings, t, poUnits, setPoUnits, 
         )}
       </div>
 
+      {/* Add Inbound field */}
+      <div style={{display:"flex",alignItems:"center",gap:10,marginTop:8,padding:"8px 10px",background:t.surface2,borderRadius:7,border:`1px solid ${t.border}`}}>
+        <span style={{fontSize:13,fontWeight:600,color:t.text2,whiteSpace:"nowrap"}} title="Manually adds extra units on top of the file's Inbound figure. Gated by the same 'Include Inbound' checkbox in the settings bar above — turn that off and this has no effect.">
+          Add Inbound
+        </span>
+        <input
+          type="number" min={0} placeholder="0"
+          value={extraInbound?.[sku.asin] ?? ""}
+          onChange={e=>setExtraInbound(sku.asin, e.target.value)}
+          style={{width:80,background:"transparent",border:`1px solid ${t.border}`,
+            borderRadius:4,color:t.accent,padding:"3px 7px",fontSize:13,
+            textAlign:"right",outline:"none",fontFamily:"'Inter',system-ui,sans-serif",fontWeight:700}}
+        />
+        {(extraInbound?.[sku.asin]??0)>0&&(
+          <button onClick={()=>setExtraInbound(sku.asin,"")} title="Reset to 0"
+            style={{fontSize:9,padding:"3px 8px",background:t.surface,border:`1px solid ${t.border}`,borderRadius:4,color:t.text3,cursor:"pointer"}}>
+            ↺ Reset
+          </button>
+        )}
+        <span style={{fontSize:10,color:t.text3}}>
+          {settings.inclInbound!==false
+            ? <>added to Inbound{(extraInbound?.[sku.asin]??0)>0&&<> — <span style={{color:t.accent,fontWeight:700}}>+{fmt(extraInbound[sku.asin])}</span> units</>}</>
+            : <>Include Inbound is off — no effect</>}
+        </span>
+      </div>
+
       {/* ── PO Deduction Tip ── */}
       {totalOpenPoQty > 0 && (
         <div style={{
@@ -3101,29 +3206,18 @@ function SKUDetail({sku, onBack, settings, setSettings, t, poUnits, setPoUnits, 
             <span style={{color:t.green,fontWeight:700}}>
               ✅ Fully covered by open POs — no new order needed.
               &nbsp;<span style={{fontWeight:400,color:t.text3}}>
-                ({skuPoRows.length} active PO{skuPoRows.length!==1?"s":""} · {fmt(totalOpenPoQty)} units in pipeline)
+                ({skuPoRows.filter(p=>p.included).length} included PO{skuPoRows.filter(p=>p.included).length!==1?"s":""} · {fmt(totalOpenPoQty)} units in pipeline)
               </span>
             </span>
           ) : (
             <span style={{color:t.accent}}>
-              💡 <strong>{fmt(totalOpenPoQty)} units</strong> across {skuPoRows.length} active PO{skuPoRows.length!==1?"s":""} deducted from gross requirement of <strong>{fmt(localSuggestedPurchaseRaw)} units</strong>.
+              💡 <strong>{fmt(totalOpenPoQty)} units</strong> across {skuPoRows.filter(p=>p.included).length} included PO{skuPoRows.filter(p=>p.included).length!==1?"s":""} deducted from gross requirement of <strong>{fmt(localSuggestedPurchaseRaw)} units</strong>.
               &nbsp;<span style={{color:t.text3}}>Still need to order: <strong style={{color:t.accent}}>{fmt(localSuggestedPurchase)} units</strong>.</span>
             </span>
           )}
         </div>
       )}
-      {localSuggestedPurchase > 0 && (
-        <div style={{marginTop:10,padding:"8px 10px",background:t.surface2,borderRadius:7,border:`1px solid ${t.border}`,fontSize:11}}>
-          <div style={{fontSize:13,fontWeight:600,color:t.text2,marginBottom:8}}>Shipment Split</div>
-          <div style={{display:"flex",gap:12,flexWrap:"wrap"}}>
-            {splitScenario!==4&&<span>🚢 Sea: <span style={{color:t.green,fontWeight:700,fontFamily:"'Inter',system-ui,sans-serif"}}>{fmt(localSeaQty)} units</span> <span style={{color:t.text3,fontSize:10}}>({effectiveLT}d ETA)</span></span>}
-            {hasAir&&(splitScenario===3||splitScenario===4)&&localAirQty>0
-              ? <span>✈ Air: <span style={{color:t.accent,fontWeight:700,fontFamily:"'Inter',system-ui,sans-serif"}}>{fmt(localAirQty)} units</span> <span style={{color:t.text3,fontSize:10}}>({effectiveAirLT}d ETA · bridge gap)</span></span>
-              : hasAir&&splitScenario!==4&&<span style={{color:t.text3,fontSize:10}}>✈ Air: not required</span>
-            }
-          </div>
-        </div>
-      )}
+      {/* Sea/Air split now lives once, in the Shipment Plan card above — no duplicate here */}
     </div>
 
     {/* FC Detail */}
@@ -3487,6 +3581,36 @@ export default function FBAPlanner(){
       return next;
     });
   };
+  const[extraInbound,setExtraInboundRaw]=useState(()=>{
+    try{return JSON.parse(localStorage.getItem("fba_extra_inbound")||"{}");}catch(_){return {};}
+  });
+  const setExtraInbound=(asin,val)=>{
+    setExtraInboundRaw(prev=>{
+      const next={...prev};
+      const n=parseInt(val,10);
+      if(!val||isNaN(n)||n<=0) delete next[asin]; else next[asin]=n;
+      try{localStorage.setItem("fba_extra_inbound",JSON.stringify(next));}catch(_){}
+      return next;
+    });
+  };
+  // Per-PO include/exclude selection — { [asin]: { [rowKey]: false } }, opt-out model
+  // (a PO counts unless explicitly unchecked), so default behavior is unchanged.
+  // Keyed by row position (1,2,3,...), not PO Number text — see buildOpenPoMap for why.
+  const[poSelection,setPoSelectionRaw]=useState(()=>{
+    try{return JSON.parse(localStorage.getItem("fba_po_selection")||"{}");}catch(_){return {};}
+  });
+  const togglePoSelection=(asin,rowKey)=>{
+    setPoSelectionRaw(prev=>{
+      const cur=prev[asin]||{};
+      const wasIncluded=cur[rowKey]!==false;
+      const nextForAsin={...cur,[rowKey]:!wasIncluded};
+      if(nextForAsin[rowKey]===true) delete nextForAsin[rowKey]; // true is the default, no need to store it
+      const next={...prev};
+      if(Object.keys(nextForAsin).length===0) delete next[asin]; else next[asin]=nextForAsin;
+      try{localStorage.setItem("fba_po_selection",JSON.stringify(next));}catch(_){}
+      return next;
+    });
+  };
 
   // Clear any stale adjustment multipliers from previous sessions
   useEffect(()=>{ try { localStorage.removeItem("fba_sales_adj"); } catch(_) {} },[]);
@@ -3496,11 +3620,14 @@ export default function FBAPlanner(){
     const{salesByAsinDay,salesByAsinDayChart,warnings:ow,maxDate,minSalesDate,regionalSales,citySales,lastOrderDate}=processOrders(ordRows);
     const{fcData,ledgerDate}=processLedger(ledRows||[]);
     const ltData=processLeadtime(ltRows||[]);
-    const openPoMap=buildOpenPoMap(purchRows||[]);
     setWarnings([...iw,...ow]);
     setParseDebug(debug||null);
-    setRawData({inv,salesByAsinDay,salesByAsinDayChart,fcData,ltData,openPoMap,purchRows:purchRows||[],maxDate,minSalesDate,ledgerDate,regionalSales,citySales,lastOrderDate});
+    setRawData({inv,salesByAsinDay,salesByAsinDayChart,fcData,ltData,purchRows:purchRows||[],maxDate,minSalesDate,ledgerDate,regionalSales,citySales,lastOrderDate});
   },[]);
+
+  // Recomputed whenever the purchase file or the per-PO selection changes,
+  // so unchecking a PO in SKU Detail is reflected everywhere without a reload.
+  const openPoMap=useMemo(()=>buildOpenPoMap(rawData?.purchRows||[],poSelection),[rawData?.purchRows,poSelection]);
 
   useEffect(()=>{
     if(!rawData) return;
@@ -3508,9 +3635,9 @@ export default function FBAPlanner(){
     Object.keys(rawData.inv).forEach(asin=>{
       if(isActive(skuCfg,asin)) activeInv[asin]=rawData.inv[asin];
     });
-    setData(computeAll(activeInv,rawData.salesByAsinDay,rawData.fcData,settings,rawData.maxDate,rawData.regionalSales,rawData.citySales,rawData.ltData,poUnits,rawData.lastOrderDate,rawData.salesByAsinDayChart,rawData.openPoMap,skuCfg));
+    setData(computeAll(activeInv,rawData.salesByAsinDay,rawData.fcData,settings,rawData.maxDate,rawData.regionalSales,rawData.citySales,rawData.ltData,poUnits,rawData.lastOrderDate,rawData.salesByAsinDayChart,openPoMap,skuCfg,extraInbound));
     if(tab==="input") setTab("dashboard");
-  },[rawData,settings,skuCfg,poUnits]);
+  },[rawData,settings,skuCfg,poUnits,extraInbound,openPoMap]);
 
   const wc=warnings.filter(w=>w.type.includes("unmapped")).length;
   const fcCrit=data?Object.values(data).filter(d=>
@@ -3636,14 +3763,23 @@ export default function FBAPlanner(){
         </div>
         <div className="content">
           <div style={{display:tab==="input"?"block":"none"}}>
-            <DataInput ref={dataInputRef} onLoaded={onLoaded} loading={loading} setLoading={setLoading} t={t} parseDebug={parseDebug}/>
-            {loading&&<div className="ld"><div className="sp"/><div style={{fontSize:11,color:t.text3}}>Processing data…</div></div>}
+            {loading&&!rawData&&(
+              <div className="ld" style={{height:"60vh"}}>
+                <div className="sp"/>
+                <div style={{fontSize:13,color:t.text2,fontWeight:600}}>Loading your inventory data…</div>
+                <div style={{fontSize:11,color:t.text3}}>Fetching Inventory, Sales, Ledger and Leadtime from Google Sheets</div>
+              </div>
+            )}
+            <div style={{display:loading&&!rawData?"none":"block"}}>
+              <DataInput ref={dataInputRef} onLoaded={onLoaded} loading={loading} setLoading={setLoading} t={t} parseDebug={parseDebug}/>
+              {loading&&<div className="ld"><div className="sp"/><div style={{fontSize:11,color:t.text3}}>Processing data…</div></div>}
+            </div>
           </div>
           {data&&<div style={{display:tab==="allskus"?"block":"none"}}><AllSKUs data={data} settings={settings} setSettings={setSettings} onSku={goSku} t={t}/></div>}
-          {tab==="dashboard"&&data&&<Dashboard data={data} settings={settings} setSettings={setSettings} onSku={goSku} t={t}/>}
+          {tab==="dashboard"&&data&&<Dashboard data={data} settings={settings} setSettings={setSettings} onSku={goSku} t={t} purchRows={rawData?.purchRows||[]}/>}
           {tab==="fc"&&data&&<FCView data={data} settings={settings} setSettings={setSettings} onSku={goSku} t={t}/>}
           {tab==="lis"&&data&&<LISView data={data} settings={settings} setSettings={setSettings} onSku={goSku} t={t}/>}
-          {tab==="procurement"&&data&&<ProcurementForecast data={data} ltData={rawData?.ltData} anchorDate={rawData?.maxDate} openPoMap={rawData?.openPoMap||{}} settings={settings} t={t}/>}
+          {tab==="procurement"&&data&&<ProcurementForecast data={data} ltData={rawData?.ltData} anchorDate={rawData?.maxDate} openPoMap={openPoMap||{}} settings={settings} t={t}/>}
           {tab==="skumgr"&&<SKUManager skuCfg={skuCfg} setSkuCfg={setSkuCfg} data={data} settings={settings} setSettings={setSettings} t={t}/>}
           {tab==="warnings"&&<WarningsPage warnings={warnings} t={t}/>}
           {tab==="detail"&&data&&selSku&&(
@@ -3658,6 +3794,10 @@ export default function FBAPlanner(){
               purchRows={rawData?.purchRows||[]}
               skuCfg={skuCfg}
               setSkuCfg={setSkuCfg}
+              extraInbound={extraInbound}
+              setExtraInbound={setExtraInbound}
+              poSelection={poSelection}
+              togglePoSelection={togglePoSelection}
             />
           )}
           {!data&&tab!=="input"&&tab!=="warnings"&&(

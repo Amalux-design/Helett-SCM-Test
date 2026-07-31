@@ -2892,11 +2892,12 @@ function SKUDetail({sku, onBack, settings, setSettings, t, poUnits, setPoUnits, 
         ⓘ Including {fmt(pl.poStockQty)} PO units in stock for the figures below (forecast-only — purchase/replenish qty unaffected)
       </div>
     )}
-    <div className="d4" style={{marginBottom:10,gridTemplateColumns:"repeat(3,1fr)"}}>
+    <div className="d4" style={{marginBottom:10,gridTemplateColumns:"repeat(4,1fr)"}}>
       {[
         {l:"Days of Inventory",v:isFinite(displayDoi)?`${fmt(displayDoi,1)}d`:"∞",col:displayDoi<7?t.red:displayDoi<21?t.yellow:t.green},
         {l:"Stockout Date",v:fmtDate(displayStockoutDate),col:displayDoi<7?t.red:displayDoi<21?t.yellow:t.text},
         {l:"Weighted Demand",v:fmt(vel.demand,2)+"/day",col:t.accent},
+        {l:"FBA Replenishment Qty",v:fmt(pl.replenishQty),col:pl.replenishQty>0?t.yellow:t.green},
       ].map(k=>(
         <div key={k.l} className="kc">
           <div className="kl">{k.l}</div>

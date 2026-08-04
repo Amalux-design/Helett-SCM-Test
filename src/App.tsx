@@ -3281,6 +3281,12 @@ function SKUDetail({sku, onBack, settings, setSettings, t, poUnits, setPoUnits, 
     </div>}
     {!hasFCData&&<div className="alert ab" style={{marginBottom:10}}>ℹ No ledger data — FC-level analysis unavailable.</div>}
 
+    {/* ── TOP CITIES ── */}
+    <div className="card" style={{marginBottom:10}}>
+      <div className="ch">Top Cities by Demand</div>
+      <TopCities citySales={citySales} t={t}/>
+    </div>
+
     {/* ── 30-DAY SALES TREND ── */}
     {salesHistory&&salesHistory.length>1&&(
     <div className="card" style={{marginBottom:10}}>
@@ -3307,12 +3313,6 @@ function SKUDetail({sku, onBack, settings, setSettings, t, poUnits, setPoUnits, 
     <div className="card" style={{marginBottom:10}}>
       <div className="ch">India Regional Demand & Stock Heatmap</div>
       <IndiaHeatmap regionalSales={regionalSales} fcPlanning={fcPlanning} settings={settings} velocity={vel} t={t}/>
-    </div>
-
-    {/* ── TOP CITIES ── */}
-    <div className="card" style={{marginBottom:10}}>
-      <div className="ch">Top Cities by Demand</div>
-      <TopCities citySales={citySales} t={t}/>
     </div>
 
     {/* ── 70-DAY FORECAST with Reorder Line ── */}

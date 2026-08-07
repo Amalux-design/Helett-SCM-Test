@@ -4,6 +4,7 @@ import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContai
 import { SKU_MAP } from "./data/skuMap.js";
 import { FC_CITY, fcLabel, FC_REGION } from "./data/fcMapping.js";
 import { STATE_TO_REGION } from "./data/stateRegion.js";
+import { CLUSTERS, stateNameToCode, clusterForState, stateCodeToName } from "./data/fcStateMapping.js";
 import { CITY_ALIAS, normalizeCity } from "./data/cityNormalizer.js";
 import { DARK, LIGHT } from "./data/themes.js";
 import { LOGO_ICON, NAV_ICONS } from "./data/icons.jsx";
@@ -2809,6 +2810,68 @@ function SKUDetail({sku, onBack, settings, setSettings, t, poUnits, setPoUnits, 
     });
   }
 
+  // ── Manual inbound override for the demand-based FBA Replenishment
+  // Recommendation below (separate from the ledger-based fcInbound above,
+  // since these rows are keyed by cluster, not by individual FC) ──
+  const [groupInbound, setGroupInbound] = useState(()=>{
+    try { return JSON.parse(localStorage.getItem("fc_group_inbound")||"{}"); } catch(_){ return {}; }
+  });
+  function setGroupInboundVal(asin, clusterKey, raw) {
+    setGroupInbound(prev=>{
+      const key = `${asin}::${clusterKey}`;
+      const next = {...prev};
+      const num = parseFloat(raw);
+      if (raw===""||raw===null||raw===undefined||isNaN(num)) { delete next[key]; }
+      else { next[key] = Math.max(0, Math.floor(num)); }
+      try { localStorage.setItem("fc_group_inbound", JSON.stringify(next)); } catch(_){}
+      return next;
+    });
+  }
+
+  // ── FBA Replenishment Recommendation — demand-proximity based, separate
+  // from the ledger-dispatch-based Send-Stock Recommendations above.
+  // Puts stock near where customers actually are (ship-state), not where
+  // Amazon has historically shipped it from. Dynamically follows the FBA
+  // Cover Days slider and each state's share of this SKU's weighted demand.
+  const clusterDemandRows = useMemo(()=>{
+    const cs = sku.citySales || {};
+    const stateQty = {};
+    let totalQty = 0;
+    Object.entries(cs).forEach(([key, qty])=>{
+      const stateRaw = key.split("||")[1];
+      const code = stateNameToCode(stateRaw);
+      if (!code) return;
+      stateQty[code] = (stateQty[code]||0) + qty;
+      totalQty += qty;
+    });
+    if (totalQty === 0 || vel.demand <= 0) return [];
+    const clusterQty = {};
+    const clusterStates = {};
+    Object.entries(stateQty).forEach(([code, qty])=>{
+      const clusterKey = clusterForState(code);
+      if (!clusterKey) return;
+      clusterQty[clusterKey] = (clusterQty[clusterKey]||0) + qty;
+      if (!clusterStates[clusterKey]) clusterStates[clusterKey] = new Set();
+      clusterStates[clusterKey].add(code);
+    });
+    const fcStockByCode = {};
+    (fcPlanning?.fcs||[]).forEach(fc=>{ fcStockByCode[fc.fc] = fc.stock||0; });
+    return Object.entries(clusterQty).map(([clusterKey, qty])=>{
+      const info = CLUSTERS[clusterKey];
+      const dailyDemand = vel.demand * (qty/totalQty);
+      const currentStock = (info?.fcs||[]).reduce((s,fc)=>s+(fcStockByCode[fc]||0),0);
+      const manualInbound = groupInbound[`${sku.asin}::${clusterKey}`]||0;
+      const target = Math.round(dailyDemand * settings.fbaCoverDays);
+      const needed = Math.max(0, target - currentStock - manualInbound);
+      return {
+        clusterKey, label: info?.label || clusterKey, fcs: info?.fcs||[],
+        statesCovered: [...(clusterStates[clusterKey]||[])],
+        dailyDemand, pctOfDemand: qty/totalQty*100,
+        currentStock, manualInbound, target, needed,
+      };
+    }).sort((a,b)=>b.needed-a.needed);
+  }, [sku.citySales, sku.asin, vel.demand, fcPlanning, settings.fbaCoverDays, groupInbound]);
+
 
   const soi = forecast.findIndex(p=>p.stock===0);
   const reorderStock = localReorderStock;
@@ -2892,12 +2955,14 @@ function SKUDetail({sku, onBack, settings, setSettings, t, poUnits, setPoUnits, 
         ⓘ Including {fmt(pl.poStockQty)} PO units in stock for the figures below (forecast-only — purchase/replenish qty unaffected)
       </div>
     )}
-    <div className="d4" style={{marginBottom:10,gridTemplateColumns:"repeat(4,1fr)"}}>
+    <div className="d4" style={{marginBottom:10,gridTemplateColumns:"repeat(3,1fr)"}}>
       {[
         {l:"Days of Inventory",v:isFinite(displayDoi)?`${fmt(displayDoi,1)}d`:"∞",col:displayDoi<7?t.red:displayDoi<21?t.yellow:t.green},
         {l:"Stockout Date",v:fmtDate(displayStockoutDate),col:displayDoi<7?t.red:displayDoi<21?t.yellow:t.text},
         {l:"Weighted Demand",v:fmt(vel.demand,2)+"/day",col:t.accent},
         {l:"FBA Replenishment Qty",v:fmt(pl.replenishQty),col:pl.replenishQty>0?t.yellow:t.green},
+        {l:"Gross Requirement",v:fmt(pl.netRequirement),col:pl.netRequirement>0?t.red:t.green},
+        {l:"Trend",v:calcTrend(vel.avg7,vel.avg30),col:trendColor(calcTrend(vel.avg7,vel.avg30),t)},
       ].map(k=>(
         <div key={k.l} className="kc">
           <div className="kl">{k.l}</div>
@@ -3102,7 +3167,7 @@ function SKUDetail({sku, onBack, settings, setSettings, t, poUnits, setPoUnits, 
         ))}
       </div>
       <div className="acs">
-        {[{l:"Gross Requirement",v:fmt(localSuggestedPurchaseRaw),col:localSuggestedPurchaseRaw>0?t.red:t.green},
+        {[{l:"Reorder Date",v:shipReorderDate?fmtDate(shipReorderDate):"—",col:shipReorderPast?t.red:shipReorderSoon?t.yellow:t.green},
           {l:"FBA Replenishment Qty",v:fmt(pl.replenishQty),col:pl.replenishQty>0?t.yellow:t.green},
           {l:"Target Stock Level",v:fmt(pl.requiredStock,0),col:t.text}].map(k=>(
           <div key={k.l} className="ac">
@@ -3280,6 +3345,64 @@ function SKUDetail({sku, onBack, settings, setSettings, t, poUnits, setPoUnits, 
       </div>}
     </div>}
     {!hasFCData&&<div className="alert ab" style={{marginBottom:10}}>ℹ No ledger data — FC-level analysis unavailable.</div>}
+
+    {/* ── FBA REPLENISHMENT RECOMMENDATION ── */}
+    {clusterDemandRows.length>0&&(
+      <div className="card" style={{marginBottom:10}}>
+        <div className="ch">FBA Replenishment Recommendation</div>
+        {clusterDemandRows.map(r=>(
+          <div key={r.clusterKey} style={{padding:"10px 12px",background:t.surface2,borderRadius:7,border:`1px solid ${t.border}`,marginBottom:8,fontSize:11}}>
+            <div style={{color:t.text,fontWeight:600,marginBottom:2}}>{r.label}</div>
+            <div style={{fontSize:11,color:t.text2,fontFamily:"'Inter',system-ui,sans-serif",marginBottom:2}}>
+              covers {r.statesCovered.map(stateCodeToName).join(", ")}
+            </div>
+            <div style={{fontSize:11,fontWeight:600,color:t.accent,fontFamily:"'Inter',system-ui,sans-serif",marginBottom:6}}>
+              {r.pctOfDemand.toFixed(1)}% of this SKU's demand · {fmt(r.dailyDemand,2)} units/day
+            </div>
+            <div style={{display:"flex",flexWrap:"wrap",gap:4,marginBottom:8}}>
+              {r.fcs.map(fc=>(
+                <span key={fc} style={{
+                  fontSize:9,fontWeight:700,padding:"1px 6px",borderRadius:4,
+                  background:t.accentBg,color:t.accent,border:`1px solid ${t.accentBdr}`,
+                  fontFamily:"'Inter',system-ui,sans-serif",
+                }}>{fc}</span>
+              ))}
+            </div>
+            <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:8}}>
+              <div>
+                <div style={{fontSize:9,color:t.text3,textTransform:"uppercase",letterSpacing:".3px",marginBottom:3}} title="Units already in this cluster's FCs, from the Ledger">Current stock</div>
+                <div style={{fontSize:14,fontWeight:700,color:t.text,fontFamily:"'Inter',system-ui,sans-serif"}}>{fmt(r.currentStock)}</div>
+              </div>
+              <div>
+                <div style={{fontSize:9,color:t.text3,textTransform:"uppercase",letterSpacing:".3px",marginBottom:3}} title="Target = demand here × FBA Cover Days">Target stock</div>
+                <div style={{fontSize:14,fontWeight:700,color:t.text,fontFamily:"'Inter',system-ui,sans-serif"}}>{fmt(r.target)}</div>
+              </div>
+              <div>
+                <div style={{fontSize:9,color:t.text3,textTransform:"uppercase",letterSpacing:".3px",marginBottom:3}} title="Optional: note units already on the way that aren't reflected in Current Stock yet">Already inbound</div>
+                <input
+                  type="number" min={0} placeholder="0"
+                  value={groupInbound[`${sku.asin}::${r.clusterKey}`]??''}
+                  onChange={e=>setGroupInboundVal(sku.asin, r.clusterKey, e.target.value)}
+                  onClick={e=>e.stopPropagation()}
+                  style={{
+                    width:"100%",background:"transparent",border:`1px solid ${t.border}`,
+                    borderRadius:4,color:t.accent,padding:"3px 6px",
+                    fontSize:13,fontWeight:700,textAlign:"left",outline:"none",
+                    fontFamily:"'Inter',system-ui,sans-serif",
+                  }}
+                />
+              </div>
+              <div>
+                <div style={{fontSize:9,color:t.text3,textTransform:"uppercase",letterSpacing:".3px",marginBottom:3}} title="Target − Current Stock − Already Inbound">Recommended send</div>
+                <div style={{fontSize:14,fontWeight:700,fontFamily:"'Inter',system-ui,sans-serif",color:r.needed>0?t.accent:t.green}}>
+                  {r.needed>0?`${fmt(r.needed)} units`:"✓ Covered"}
+                </div>
+              </div>
+            </div>
+          </div>
+        ))}
+      </div>
+    )}
 
     {/* ── TOP CITIES ── */}
     <div className="card" style={{marginBottom:10}}>
@@ -3594,6 +3717,22 @@ export default function FBAPlanner(){
       return next;
     });
   };
+  // Reset every SKU's Purchased Units, Priority Demand and Add Inbound back to default (unset/auto).
+  function resetManualValues(){
+    setPoUnitsRaw({});
+    try{localStorage.removeItem("fba_po_units");}catch(_){}
+    setExtraInboundRaw({});
+    try{localStorage.removeItem("fba_extra_inbound");}catch(_){}
+    setSkuCfgRaw(prev=>{
+      const next={};
+      Object.keys(prev).forEach(asin=>{
+        const {priorityDemand, ...rest}=prev[asin];
+        next[asin]=rest;
+      });
+      saveSkuConfig(next);
+      return next;
+    });
+  }
   // Per-PO include/exclude selection — { [asin]: { [rowKey]: false } }, opt-out model
   // (a PO counts unless explicitly unchecked), so default behavior is unchanged.
   // Keyed by row position (1,2,3,...), not PO Number text — see buildOpenPoMap for why.
@@ -3759,6 +3898,7 @@ export default function FBAPlanner(){
             )}
             
             <button className="tb-btn" onClick={()=>dataInputRef.current?.refreshSheets()} disabled={loading} title="Re-fetch data from Google Sheets">{loading?"Refreshing…":"⟳ Refresh"}</button>
+            <button className="tb-btn" onClick={()=>{if(window.confirm("Reset Purchased Units, Priority Demand and Add Inbound for every SKU back to default? This can't be undone."))resetManualValues();}} title="Reset Purchased Units, Priority Demand and Add Inbound for every SKU back to default">↺ Reset Values</button>
             <button className="tb-btn-accent" onClick={()=>setDark(d=>!d)}>{dark?"Light":"Dark"}</button>
           </div>
         </div>

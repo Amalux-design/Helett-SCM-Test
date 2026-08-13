@@ -141,4 +141,5 @@ export const SKU_MAP = {
   "B0H1HP2K4L":{"sellerSku":"Helett 4x6 Thermal Label (400)","finalName":"Helett 4x6 Thermal Label (400)"},
   "B0H5R8L5LW":{"sellerSku":"HLT552 Portable Monitor Pro","finalName":"Portable Monitor Pro "},
   "B0H6QGN526":{"sellerSku":"2x1 Label Roll","finalName":"2x1 Label Roll"},
+  "B0HCTXG4RD":{"sellerSku":"HLT551 Logic View Neo","finalName":"Logic View Neo"},
 };

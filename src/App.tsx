@@ -1455,11 +1455,20 @@ function Dashboard({data,settings,setSettings,onSku,t,purchRows}){
 /* ═══════════════════════════════════════════════════════════════
    ALL SKUs
 ═══════════════════════════════════════════════════════════════ */
-function AllSKUs({data,settings,setSettings,onSku,t}){
+function AllSKUs({data,settings,setSettings,onSku,t,setPoUnits,setExtraInbound,skuCfg,setSkuCfg}){
   const[q,setQ]=useState(""),[fil,setFil]=useState("all");
   const[sort,setSort]=useState({col:"doi",dir:"asc"});
   const[picked,setPicked]=useState(()=>new Set());
   function togglePick(asin,e){e.stopPropagation();setPicked(prev=>{const nx=new Set(prev);nx.has(asin)?nx.delete(asin):nx.add(asin);return nx;});}
+  // Reset just this one SKU's Purchased Units, Priority Demand and Add Inbound
+  function resetSku(asin,e){
+    e.stopPropagation();
+    setPoUnits(asin,"");
+    setExtraInbound(asin,"");
+    const cur=skuCfg?.[asin]||{active:true};
+    const {priorityDemand, ...rest}=cur;
+    setSkuCfg({...skuCfg,[asin]:rest});
+  }
 
   function toggleSort(col){
     setSort(s=>({col,dir:s.col===col&&s.dir==="asc"?"desc":"asc"}));
@@ -1570,22 +1579,37 @@ function AllSKUs({data,settings,setSettings,onSku,t}){
           <SortTh col="buy" label="Buy Qty"/>
           <SortTh col="replen" label="Replenish"/>
           <th>Status</th>
+          <th></th>
         </tr></thead>
-        <tbody>{skus.map(d=>(
+        <tbody>{skus.map(d=>{
+          const hasPriorityDemand = (d.priorityDemand||0)>0;
+          const displayDemand = hasPriorityDemand ? d.effectiveDemand : d.velocity.demand;
+          const extraInboundQty = d.extraInboundUnits||0;
+          const displayInbound = (d.inbound||0) + extraInboundQty;
+          const hasAnyManual = hasPriorityDemand || extraInboundQty>0 || (d.purchasedUnits||0)>0;
+          return(
           <tr key={d.asin} className="cr" onClick={()=>onSku(d.asin)} style={picked.has(d.asin)?{background:t.accentBg}:undefined}>
             <td onClick={e=>togglePick(d.asin,e)}><input type="checkbox" checked={picked.has(d.asin)} onChange={()=>{}} style={{cursor:"pointer"}}/></td>
             <td style={{textAlign:"left"}}><div className="tn">{d.finalName}</div><div className="ta">{d.sellerSku}</div></td>
             <td style={{textAlign:"left"}} className="ta">{d.asin}</td>
             <td><span style={{fontSize:10,color:trendColor(calcTrend(d.velocity.avg7,d.velocity.avg30),t),fontFamily:"'Inter',system-ui,sans-serif",whiteSpace:"nowrap"}}>{calcTrend(d.velocity.avg7,d.velocity.avg30)}</span></td>
-            <td style={{fontWeight:700,color:t.text}}>{fmt(d.velocity.demand,2)}</td>
-            <td>{fmt(d.currentStock)}</td><td>{fmt(d.fbaAvailable)}</td><td>{fmt(d.fcSellable)}</td><td>{fmt(d.inbound)}</td>
+            <td style={{fontWeight:700,color:hasPriorityDemand?t.accent:t.text}} title={hasPriorityDemand?`Priority Demand override active (weighted avg is ${fmt(d.velocity.demand,2)})`:undefined}>{fmt(displayDemand,2)}</td>
+            <td>{fmt(d.currentStock)}</td><td>{fmt(d.fbaAvailable)}</td><td>{fmt(d.fcSellable)}</td>
+            <td style={{color:extraInboundQty>0?t.accent:undefined,fontWeight:extraInboundQty>0?700:undefined}} title={extraInboundQty>0?`Includes +${fmt(extraInboundQty)} Add Inbound (file value is ${fmt(d.inbound)})`:undefined}>{fmt(displayInbound)}</td>
             <td><DOI doi={d.planning.doi} t={t}/></td>
             <td style={{color:d.planning.doi<30?t.red:t.text3}}>{fmtDate(d.planning.stockoutDate)}</td>
             <td style={{color:t.accent,fontWeight:700}}>{d.planning.suggestedPurchase>0?fmt(d.planning.suggestedPurchase):"—"}</td>
             <td style={{color:t.yellow,fontWeight:700}}>{d.planning.replenishQty>0?fmt(d.planning.replenishQty):"—"}</td>
             <td><PBadge action={d.planning.action} priority={d.planning.priority} purchasePct={d.planning.purchasePct||0} replenishPct={d.planning.replenishPct||0} t={t}/></td>
+            <td>
+              {hasAnyManual&&(
+                <span onClick={e=>resetSku(d.asin,e)} title="Reset this SKU's Purchased Units, Priority Demand and Add Inbound"
+                  style={{cursor:"pointer",color:t.text3,fontSize:13,padding:"2px 4px"}}>↺</span>
+              )}
+            </td>
           </tr>
-        ))}</tbody>
+          );
+        })}</tbody>
       </table></div>
     </div>
   </div>);
@@ -3916,7 +3940,7 @@ export default function FBAPlanner(){
               {loading&&<div className="ld"><div className="sp"/><div style={{fontSize:11,color:t.text3}}>Processing data…</div></div>}
             </div>
           </div>
-          {data&&<div style={{display:tab==="allskus"?"block":"none"}}><AllSKUs data={data} settings={settings} setSettings={setSettings} onSku={goSku} t={t}/></div>}
+          {data&&<div style={{display:tab==="allskus"?"block":"none"}}><AllSKUs data={data} settings={settings} setSettings={setSettings} onSku={goSku} t={t} setPoUnits={setPoUnits} setExtraInbound={setExtraInbound} skuCfg={skuCfg} setSkuCfg={setSkuCfg}/></div>}
           {tab==="dashboard"&&data&&<Dashboard data={data} settings={settings} setSettings={setSettings} onSku={goSku} t={t} purchRows={rawData?.purchRows||[]}/>}
           {tab==="fc"&&data&&<FCView data={data} settings={settings} setSettings={setSettings} onSku={goSku} t={t}/>}
           {tab==="lis"&&data&&<LISView data={data} settings={settings} setSettings={setSettings} onSku={goSku} t={t}/>}

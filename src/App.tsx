@@ -173,13 +173,19 @@ function processInventory(rows, fbaInvRows) {
     const proc = n(r,get,"Processing","processing");
     const fctOld = n(r,get,"FC Transfer","fc transfer","FCTransfer");
     const fct  = (fctMap[asin]!==undefined) ? fctMap[asin] : fctOld;
+    // "On Hand" from the file is kept only as a raw reference value — it's not
+    // reliably just FBA+FC Transfer (can be a broader/stale figure from the
+    // source report), so it must never be added into currentStock or it
+    // double-counts against fc/inb. Planning stock = FBA + FC Transfer + FC
+    // Sellable + Inbound, explicitly, regardless of what the file's own
+    // "On Hand" column says.
     const onh  = n(r,get,"On Hand","on hand","OnHand") || (fba + fct);
     const cost = n(r,get,"Unit Cost (₹)","Unit Cost","unit cost");
     inv[asin]={
       asin, csvSku, finalName:SKU_MAP[asin].finalName, sellerSku:SKU_MAP[asin].sellerSku,
       fcSellable:fc, fcUnsellable:fcU, fbaAvailable:fba, fbaUnsellable:fbaU,
       inbound:inb, processing:proc, fcTransfer:fct, onHand:onh,
-      currentStock: onh + fc + inb,
+      currentStock: fba + fct + fc + inb,
       unitCost:cost,
       statusFlags: s(r,get,"Status Flags","StatusFlags","status flags"),
     };
@@ -3000,7 +3006,7 @@ function SKUDetail({sku, onBack, settings, setSettings, t, poUnits, setPoUnits, 
       <div className="card">
         <div className="ch">Inventory Breakdown</div>
         {[["FBA Available",fmt(sku.fbaAvailable)],["FBA Unsellable",fmt(sku.fbaUnsellable)],
-          ["FC Transfer",fmt(sku.fcTransfer||0)],["On Hand (FBA + FC Transfer)",fmt(sku.onHand||(sku.fbaAvailable+sku.fcTransfer)||0)],
+          ["FC Transfer",fmt(sku.fcTransfer||0)],["On Hand (FBA + FC Transfer)",fmt((sku.fbaAvailable||0)+(sku.fcTransfer||0))],
           ["FC Sellable",fmt(sku.fcSellable)],["FC Unsellable",fmt(sku.fcUnsellable)],
           ["Inbound",fmt(sku.inbound)],
           ["Total Current Stock",fmt(sku.currentStock)],["Unit Cost",sku.unitCost?`₹${fmt(sku.unitCost,2)}`:"—"]].map(([k,v])=>(

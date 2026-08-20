@@ -8,8 +8,10 @@ html{height:100%;font-size:13px;overflow:hidden}
 body{height:100%;overflow:hidden;background:${t.bg};color:${t.text};font-family:'Inter',system-ui,sans-serif;line-height:1.45;-webkit-font-smoothing:antialiased}
 #fba-root{display:flex;height:100vh;width:100%;overflow:hidden;position:fixed;top:0;left:0;right:0;bottom:0;text-align:left}
 .content,.topbar,.tb-title,.tb-sub,.ch,.card,.kc,h1,h2,h3,p,div{text-align:left}
-.sb{width:240px;flex:0 0 240px;background:${t.sidebar};border-right:1px solid ${t.sbBorder};display:flex;flex-direction:column;transition:width .2s ease,flex-basis .2s ease;overflow:hidden}
+.sb{width:240px;flex:0 0 240px;background:${t.sidebar};border-right:1px solid ${t.sbBorder};display:flex;flex-direction:column;overflow:hidden}
 .sb.col{width:52px;flex-basis:52px}
+.sb-overlay{position:fixed;top:0;left:0;height:100vh;z-index:50;box-shadow:8px 0 28px rgba(0,0,0,.35);transform:translateX(-100%);opacity:0;pointer-events:none;transition:transform .15s ease,opacity .15s ease}
+.sb-overlay.show{transform:translateX(0);opacity:1;pointer-events:auto}
 .sb-logo{padding:16px 16px 14px;border-bottom:1px solid ${t.sbBorder};display:flex;align-items:center;gap:9px;min-height:54px;flex-shrink:0}
 .sb-icon{width:30px;height:30px;background:${t.accent};border-radius:6px;display:flex;align-items:center;justify-content:center;flex-shrink:0}
 .sb-icon-svg{width:16px;height:16px;fill:none;stroke:#fff;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}

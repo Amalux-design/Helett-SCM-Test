@@ -2742,6 +2742,18 @@ const JUMP_SECTIONS = [
 function JumpNav({sections, stickyHeaderRef, t}){
   const [open, setOpen] = useState(false);
   const wrapRef = useRef(null);
+  const closeTimer = useRef(null);
+  // Notion-style: hover opens/closes the panel (small delay on close so
+  // crossing the gap between tab and list doesn't dismiss it). Click is kept
+  // too, as a fallback for touch devices that have no hover.
+  function openNow(){
+    if(closeTimer.current){ clearTimeout(closeTimer.current); closeTimer.current=null; }
+    setOpen(true);
+  }
+  function closeSoon(){
+    closeTimer.current = setTimeout(()=>setOpen(false), 150);
+  }
+  useEffect(()=>()=>{ if(closeTimer.current) clearTimeout(closeTimer.current); },[]);
   useEffect(()=>{
     if(!open) return;
     const onDocClick=e=>{ if(!wrapRef.current?.contains(e.target)) setOpen(false); };
@@ -2767,30 +2779,32 @@ function JumpNav({sections, stickyHeaderRef, t}){
     setOpen(false);
   }
   return (
-    <div ref={wrapRef} style={{position:"fixed", left:0, top:"50%", transform:"translateY(-50%)", zIndex:30}}>
-      {!open && (
-        <button
-          onClick={()=>setOpen(true)}
-          title="Jump to section"
-          style={{
-            display:"flex", flexDirection:"column", gap:3, alignItems:"center", justifyContent:"center",
-            width:18, height:44, borderRadius:"0 8px 8px 0",
-            background:t.surface, border:`1px solid ${t.border}`, borderLeft:"none",
-            cursor:"pointer", boxShadow:"0 2px 6px rgba(0,0,0,.12)",
-          }}
-        >
-          {[0,1,2].map(i=>(
-            <span key={i} style={{width:8,height:2,borderRadius:1,background:t.text3}}/>
-          ))}
-        </button>
-      )}
-      {open && (
-        <div style={{
-          width:250, maxHeight:"70vh", overflowY:"auto",
-          background:t.surface, border:`1px solid ${t.border}`, borderLeft:"none",
-          borderRadius:"0 12px 12px 0", boxShadow:"0 8px 24px rgba(0,0,0,.22)",
-          padding:6, fontFamily:"'Inter',system-ui,sans-serif",
-        }}>
+    <div ref={wrapRef}
+      onMouseEnter={openNow}
+      onMouseLeave={closeSoon}
+      style={{position:"fixed", right:0, top:"50%", transform:"translateY(-50%)", zIndex:30, display:"flex", justifyContent:"flex-end"}}
+    >
+      <button
+        onClick={()=>setOpen(v=>!v)}
+        title="Jump to section"
+        style={{
+          display:"flex", flexDirection:"column", gap:4, alignItems:"center", justifyContent:"center",
+          width:24, height:52, flexShrink:0,
+          background:"transparent", border:"none",
+          cursor:"pointer",
+        }}
+      >
+        {[0,1,2,3].map(i=>(
+          <span key={i} style={{width:14,height:1.5,borderRadius:1,background:t.text3,opacity:.7}}/>
+        ))}
+      </button>
+      <div style={{
+        width: open ? 250 : 0, maxHeight:"70vh", overflow:"hidden",
+        background:t.surface, border: open ? `1px solid ${t.border}` : "none", borderRight:"none",
+        borderRadius:"12px 0 0 12px", boxShadow: open ? "0 8px 24px rgba(0,0,0,.22)" : "none",
+        transition:"width .16s ease", fontFamily:"'Inter',system-ui,sans-serif",
+      }}>
+        <div style={{width:250, maxHeight:"70vh", overflowY:"auto", padding:6}}>
           <div style={{fontSize:10,color:t.text3,fontWeight:700,textTransform:"uppercase",letterSpacing:".4px",padding:"6px 10px 4px"}}>
             Jump to section
           </div>
@@ -2806,7 +2820,7 @@ function JumpNav({sections, stickyHeaderRef, t}){
             >{s.label}</div>
           ))}
         </div>
-      )}
+      </div>
     </div>
   );
 }
@@ -3835,7 +3849,15 @@ export default function FBAPlanner(){
   const[parseDebug,setParseDebug]=useState(null);
   const t=dark?DARK:LIGHT;
   const[tab,setTab]=useState("input");
-  const[col,setCol]=useState(false);
+  // Sidebar is always collapsed in layout (never resizes .main / triggers reflow).
+  // The full-width nav is a position:fixed overlay shown on hover — "pinned" keeps
+  // it open without hovering, still as an overlay, still no layout change.
+  const[pinned,setPinned]=useState(false);
+  const[sbHover,setSbHover]=useState(false);
+  const sbHoverTimer=useRef(null);
+  const sbExpanded = pinned || sbHover;
+  function sbOpenNow(){ if(sbHoverTimer.current){clearTimeout(sbHoverTimer.current); sbHoverTimer.current=null;} setSbHover(true); }
+  function sbCloseSoon(){ sbHoverTimer.current=setTimeout(()=>setSbHover(false),150); }
   const[rawData,setRawData]=useState(null);
   const[data,setData]=useState(null);
   const[warnings,setWarnings]=useState([]);
@@ -3972,53 +3994,67 @@ export default function FBAPlanner(){
   // Anchor date for display
   const anchorLabel = rawData?.maxDate ? `Data: ${fmtDate(rawData.maxDate)}` : fmtDate(getToday());
 
+  // Shared nav markup for both the always-collapsed in-flow rail and the
+  // full-width hover overlay — `collapsed` just toggles the .col modifier
+  // that the existing CSS already uses to hide labels/expand icon-only.
+  function sidebarNav(collapsed){
+    return(<>
+      <div className="sb-logo">
+        {LOGO_ICON}
+        <div className="sb-txt"><h1>Inventory Forecast</h1></div>
+      </div>
+      <div className="sb-nav">
+        <div className="sb-sec">
+          <div className="sb-lbl">Navigation</div>
+          {TABS.map(tb=>{
+            const disabled=tb.id!=="input"&&!data&&tb.id!=="warnings";
+            return(
+              <div key={tb.id}
+                className={`ni${tab===tb.id||(tab==="detail"&&tb.id==="allskus")?" on":""}${disabled?" disabled":""}`}
+                onClick={()=>{if(disabled)return;setSelSku(null);setTab(tb.id);setSbHover(false);}}>
+                <span className="ni-ic">{NAV_ICONS[tb.id]}</span>
+                <span className="ni-txt">{tb.l}</span>
+                {tb.badge>0&&<span className={`nb${tb.bc?" "+tb.bc:""}`}>{tb.badge}</span>}
+              </div>
+            );
+          })}
+        </div>
+        {data&&!collapsed&&<div className="sb-sec">
+          <div
+style={{
+  padding:"5px 8px",
+  marginTop:12,
+  paddingTop:8,
+  borderTop:"1px solid rgba(255,255,255,.06)",
+  color:"rgba(186, 170, 255, 0.28)",
+  fontSize:8,
+  letterSpacing:1.4,
+  fontFamily:"'Inter',system-ui,sans-serif",
+}}
+>
+  Designed for Helett
+</div>
+        </div>}
+      </div>
+      <div className="sb-foot" onClick={()=>setPinned(p=>!p)} title={pinned?"Unpin sidebar":"Pin sidebar open"}>
+        <svg className="sb-foot-icon" viewBox="0 0 18 18" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+          {collapsed?<polyline points="7,5 11,9 7,13"/>:<polyline points="11,5 7,9 11,13"/>}
+        </svg>
+      </div>
+    </>);
+  }
+
   return(<>
     <style>{makeCSS(t)}</style>
     <div id="fba-root">
-      {/* SIDEBAR */}
-      <div className={`sb${col?" col":""}`}>
-        <div className="sb-logo">
-          {LOGO_ICON}
-          <div className="sb-txt"><h1>Inventory Forecast</h1></div>
-        </div>
-        <div className="sb-nav">
-          <div className="sb-sec">
-            <div className="sb-lbl">Navigation</div>
-            {TABS.map(tb=>{
-              const disabled=tb.id!=="input"&&!data&&tb.id!=="warnings";
-              return(
-                <div key={tb.id}
-                  className={`ni${tab===tb.id||(tab==="detail"&&tb.id==="allskus")?" on":""}${disabled?" disabled":""}`}
-                  onClick={()=>{if(disabled)return;setSelSku(null);setTab(tb.id);}}>
-                  <span className="ni-ic">{NAV_ICONS[tb.id]}</span>
-                  <span className="ni-txt">{tb.l}</span>
-                  {tb.badge>0&&<span className={`nb${tb.bc?" "+tb.bc:""}`}>{tb.badge}</span>}
-                </div>
-              );
-            })}
-          </div>
-          {data&&!col&&<div className="sb-sec">
-            <div
-  style={{
-    padding:"5px 8px",
-    marginTop:12,
-    paddingTop:8,
-    borderTop:"1px solid rgba(255,255,255,.06)",
-    color:"rgba(186, 170, 255, 0.28)",
-    fontSize:8,
-    letterSpacing:1.4,
-    fontFamily:"'Inter',system-ui,sans-serif",
-  }}
->
-    Designed for Helett
-</div>
-          </div>}
-        </div>
-        <div className="sb-foot" onClick={()=>setCol(c=>!c)}>
-          <svg className="sb-foot-icon" viewBox="0 0 18 18" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-            {col?<polyline points="11,5 7,9 11,13"/>:<polyline points="7,5 11,9 7,13"/>}
-          </svg>
-        </div>
+      {/* SIDEBAR — a permanently-collapsed rail sits in the flex layout (so
+          .main never resizes/reflows), and a full-width copy renders as a
+          position:fixed overlay on hover, sitting on top of the page. */}
+      <div className="sb col" onMouseEnter={sbOpenNow} onMouseLeave={sbCloseSoon}>
+        {sidebarNav(true)}
+      </div>
+      <div className={`sb sb-overlay${sbExpanded?" show":""}`} onMouseEnter={sbOpenNow} onMouseLeave={sbCloseSoon}>
+        {sidebarNav(false)}
       </div>
 
       {/* MAIN */}

@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef, useMemo, forwardRef, useImperativeHandle } from "react";
+import { useState, useEffect, useCallback, useRef, useMemo, forwardRef, useImperativeHandle, lazy, Suspense } from "react";
 import { createPortal } from "react-dom";
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine, BarChart, Bar, Cell } from "recharts";
 import { SKU_MAP } from "./data/skuMap.js";
@@ -9,6 +9,10 @@ import { CITY_ALIAS, normalizeCity } from "./data/cityNormalizer.js";
 import { DARK, LIGHT } from "./data/themes.js";
 import { LOGO_ICON, NAV_ICONS } from "./data/icons.jsx";
 import { makeCSS } from "./data/makeCSS.js";
+// Code-split: FCMap (and the Leaflet library it loads at runtime) is only
+// fetched when someone actually opens a SKU Detail page — never part of
+// the main bundle, so it can't slow down the initial Google Sheets fetch.
+const FCMap = lazy(() => import("./components/FCMap.jsx"));
 
 
 /* ═══════════════════════════════════════════════════════════════
@@ -2717,6 +2721,96 @@ function TopCities({ citySales, t }) {
   );
 }
 
+const JUMP_SECTIONS = [
+  {id:"sec-inventory-breakdown", label:"Inventory Breakdown"},
+  {id:"sec-active-pos", label:"Active Purchase Orders"},
+  {id:"sec-shipment-plan", label:"Shipment Plan"},
+  {id:"sec-recommended-actions", label:"Recommended Actions"},
+  {id:"sec-fc-breakdown", label:"FC Breakdown"},
+  {id:"sec-fba-replenishment", label:"FBA Replenishment Recommendation"},
+  {id:"sec-top-cities", label:"Top Cities by Demand"},
+  {id:"sec-sales-30d", label:"Sales — Last 30 Days"},
+  {id:"sec-india-heatmap", label:"India Regional Demand & Stock Heatmap"},
+  {id:"sec-70d-forecast", label:"70-Day Inventory Forecast"},
+];
+
+// Notion-style "jump to section" nav: a slim collapsed tab pinned to the
+// left edge that expands into a list on click. Scrolling always lands the
+// target section at the same spot — just below the sticky Back+Settings
+// header — measured live off stickyHeaderRef so it stays correct however
+// tall that header currently is (it wraps/grows with viewport width).
+function JumpNav({sections, stickyHeaderRef, t}){
+  const [open, setOpen] = useState(false);
+  const wrapRef = useRef(null);
+  useEffect(()=>{
+    if(!open) return;
+    const onDocClick=e=>{ if(!wrapRef.current?.contains(e.target)) setOpen(false); };
+    document.addEventListener("mousedown", onDocClick);
+    return()=>document.removeEventListener("mousedown", onDocClick);
+  },[open]);
+  function jumpTo(id){
+    const el = document.getElementById(id);
+    if(!el) return;
+    // The app scrolls inside .content (not the window) — sticky headers are
+    // positioned relative to it too, so offsets must be computed against it.
+    const scroller = document.querySelector(".content") || document.scrollingElement;
+    // stickyHeaderRef points at the .bk Back button; .sbar is its very next
+    // sibling. Measuring each element's own height (not a wrapping div) keeps
+    // both genuinely sticky — a shrink-wrapped parent would cap how far they
+    // can stay pinned to just its own (short) height.
+    const bkEl = stickyHeaderRef.current;
+    const bkH = bkEl?.getBoundingClientRect().height || 0;
+    const sbarH = bkEl?.nextElementSibling?.getBoundingClientRect().height || 0;
+    const headerH = bkH + sbarH + 14;
+    const delta = el.getBoundingClientRect().top - scroller.getBoundingClientRect().top - headerH;
+    scroller.scrollTo({top: Math.max(0, scroller.scrollTop + delta), behavior:"smooth"});
+    setOpen(false);
+  }
+  return (
+    <div ref={wrapRef} style={{position:"fixed", left:0, top:"50%", transform:"translateY(-50%)", zIndex:30}}>
+      {!open && (
+        <button
+          onClick={()=>setOpen(true)}
+          title="Jump to section"
+          style={{
+            display:"flex", flexDirection:"column", gap:3, alignItems:"center", justifyContent:"center",
+            width:18, height:44, borderRadius:"0 8px 8px 0",
+            background:t.surface, border:`1px solid ${t.border}`, borderLeft:"none",
+            cursor:"pointer", boxShadow:"0 2px 6px rgba(0,0,0,.12)",
+          }}
+        >
+          {[0,1,2].map(i=>(
+            <span key={i} style={{width:8,height:2,borderRadius:1,background:t.text3}}/>
+          ))}
+        </button>
+      )}
+      {open && (
+        <div style={{
+          width:250, maxHeight:"70vh", overflowY:"auto",
+          background:t.surface, border:`1px solid ${t.border}`, borderLeft:"none",
+          borderRadius:"0 12px 12px 0", boxShadow:"0 8px 24px rgba(0,0,0,.22)",
+          padding:6, fontFamily:"'Inter',system-ui,sans-serif",
+        }}>
+          <div style={{fontSize:10,color:t.text3,fontWeight:700,textTransform:"uppercase",letterSpacing:".4px",padding:"6px 10px 4px"}}>
+            Jump to section
+          </div>
+          {sections.map(s=>(
+            <div key={s.id}
+              onClick={()=>jumpTo(s.id)}
+              style={{
+                fontSize:12, color:t.text2, padding:"7px 10px", borderRadius:6,
+                cursor:"pointer", whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis",
+              }}
+              onMouseEnter={e=>{e.currentTarget.style.background=t.surface2; e.currentTarget.style.color=t.text;}}
+              onMouseLeave={e=>{e.currentTarget.style.background="transparent"; e.currentTarget.style.color=t.text2;}}
+            >{s.label}</div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function SKUDetail({sku, onBack, settings, setSettings, t, poUnits, setPoUnits, purchRows, skuCfg, setSkuCfg, extraInbound, setExtraInbound, poSelection, togglePoSelection}){
   if(!sku) return null;
   const {velocity:vel, planning:pl, forecast:baseForecast, forecastWithPO, fcPlanning, hasFCData, regionalSales, citySales, salesHistory} = sku;
@@ -2745,6 +2839,7 @@ function SKUDetail({sku, onBack, settings, setSettings, t, poUnits, setPoUnits, 
   const airLTBase = sku.skuAirLT ?? null;
   const defaultLT = seaLTBase ?? settings.totalLeadTime;
   const [ltAdj, setLtAdj] = useState(0);
+  const stickyHeaderRef = useRef(null);
   const effectiveLT = seaLTBase != null ? (defaultLT + ltAdj + settings.totalLeadTime) : (defaultLT + ltAdj);
   const effectiveAirLT = airLTBase != null ? airLTBase + ltAdj + settings.totalLeadTime : null;
 
@@ -2899,9 +2994,15 @@ function SKUDetail({sku, onBack, settings, setSettings, t, poUnits, setPoUnits, 
         dailyDemand, pctOfDemand: qty/totalQty*100,
         currentStock, manualInbound, target, needed,
       };
-    }).sort((a,b)=>b.needed-a.needed);
+    });
   }, [sku.citySales, sku.asin, vel.demand, fcPlanning, settings.fbaCoverDays, groupInbound]);
-
+  const [clusterSortBy, setClusterSortBy] = useState("recommendation"); // "recommendation" | "demand"
+  const sortedClusterRows = useMemo(()=>{
+    const rows = [...clusterDemandRows];
+    return clusterSortBy==="demand"
+      ? rows.sort((a,b)=>b.dailyDemand-a.dailyDemand)
+      : rows.sort((a,b)=>b.needed-a.needed);
+  }, [clusterDemandRows, clusterSortBy]);
 
   const soi = forecast.findIndex(p=>p.stock===0);
   const reorderStock = localReorderStock;
@@ -2924,7 +3025,8 @@ function SKUDetail({sku, onBack, settings, setSettings, t, poUnits, setPoUnits, 
   }
 
   return(<div>
-    <div className="bk" onClick={onBack} style={{
+    <JumpNav sections={JUMP_SECTIONS} stickyHeaderRef={stickyHeaderRef} t={t}/>
+    <div className="bk" ref={stickyHeaderRef} onClick={onBack} style={{
       position:"sticky",top:8,zIndex:20,
       transform:bkVisible?"translateY(0)":"translateY(-140%)",
       opacity:bkVisible?1:0,
@@ -3003,7 +3105,7 @@ function SKUDetail({sku, onBack, settings, setSettings, t, poUnits, setPoUnits, 
 
     {/* Inventory + Velocity */}
     <div className="d2" style={{marginBottom:10}}>
-      <div className="card">
+      <div className="card" id="sec-inventory-breakdown">
         <div className="ch">Inventory Breakdown</div>
         {[["FBA Available",fmt(sku.fbaAvailable)],["FBA Unsellable",fmt(sku.fbaUnsellable)],
           ["FC Transfer",fmt(sku.fcTransfer||0)],["On Hand (FBA + FC Transfer)",fmt((sku.fbaAvailable||0)+(sku.fcTransfer||0))],
@@ -3047,7 +3149,7 @@ function SKUDetail({sku, onBack, settings, setSettings, t, poUnits, setPoUnits, 
       };
       function statusColor(st){ return STATUS_COLORS[st.toLowerCase()] || t.text2; }
       return (
-        <div className="card" style={{marginBottom:10}}>
+        <div className="card" id="sec-active-pos" style={{marginBottom:10}}>
           <div className="ch">Active Purchase Orders</div>
           {poRows.length === 0 ? (
             <div style={{fontSize:11,color:t.text3,fontFamily:"'Inter',system-ui,sans-serif",padding:"6px 0"}}>
@@ -3121,7 +3223,7 @@ function SKUDetail({sku, onBack, settings, setSettings, t, poUnits, setPoUnits, 
     })()}
 
     {/* Shipment Plan — adapted from Procurement Forecast's air/sea logic */}
-    <div className="card" style={{marginBottom:10}}>
+    <div className="card" id="sec-shipment-plan" style={{marginBottom:10}}>
       <div className="ch">Shipment Plan</div>
       {demand === 0 ? (
         <div style={{fontSize:11,color:t.text3,fontFamily:"'Inter',system-ui,sans-serif",padding:"6px 0"}}>No demand — not applicable</div>
@@ -3179,7 +3281,7 @@ function SKUDetail({sku, onBack, settings, setSettings, t, poUnits, setPoUnits, 
     </div>
 
     {/* Recommended Actions */}
-    <div className="card" style={{marginBottom:10}}>
+    <div className="card" id="sec-recommended-actions" style={{marginBottom:10}}>
       <div className="ch">Recommended Actions</div>
       {/* Live DOI / Stockout Date / Still Need to Order — repeated here (not duplicating
           the Gross Requirement tile below) so edits to Purchased Units / Priority Demand /
@@ -3317,7 +3419,7 @@ function SKUDetail({sku, onBack, settings, setSettings, t, poUnits, setPoUnits, 
     </div>
 
     {/* FC Detail */}
-    {hasFCData&&fcPlanning&&<div className="card" style={{marginBottom:10}}>
+    {hasFCData&&fcPlanning&&<div className="card" id="sec-fc-breakdown" style={{marginBottom:10}}>
       <div className="ch">FC Breakdown</div>
       <div className="tw ts" style={{maxHeight:250,overflowY:"auto"}}>
         <table>
@@ -3378,9 +3480,23 @@ function SKUDetail({sku, onBack, settings, setSettings, t, poUnits, setPoUnits, 
 
     {/* ── FBA REPLENISHMENT RECOMMENDATION ── */}
     {clusterDemandRows.length>0&&(
-      <div className="card" style={{marginBottom:10}}>
-        <div className="ch">FBA Replenishment Recommendation</div>
-        {clusterDemandRows.map(r=>(
+      <div className="card" id="sec-fba-replenishment" style={{marginBottom:10}}>
+        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:10,flexWrap:"wrap",gap:8}}>
+          <div className="ch" style={{marginBottom:0}}>FBA Replenishment Recommendation</div>
+          <div style={{display:"flex",gap:4,fontSize:10,fontFamily:"'Inter',system-ui,sans-serif"}}>
+            <span style={{color:t.text3,alignSelf:"center",marginRight:2}}>Sort by</span>
+            {[["recommendation","Recommendation"],["demand","Demand"]].map(([key,label])=>(
+              <button key={key} onClick={()=>setClusterSortBy(key)} style={{
+                padding:"4px 10px",borderRadius:6,cursor:"pointer",fontWeight:600,
+                background:clusterSortBy===key?t.accent:t.surface2,
+                color:clusterSortBy===key?"#fff":t.text3,
+                border:`1px solid ${clusterSortBy===key?t.accent:t.border}`,
+                fontFamily:"'Inter',system-ui,sans-serif",
+              }}>{label}</button>
+            ))}
+          </div>
+        </div>
+        {sortedClusterRows.map(r=>(
           <div key={r.clusterKey} style={{padding:"10px 12px",background:t.surface2,borderRadius:7,border:`1px solid ${t.border}`,marginBottom:8,fontSize:11}}>
             <div style={{color:t.text,fontWeight:600,marginBottom:2}}>{r.label}</div>
             <div style={{fontSize:11,color:t.text2,fontFamily:"'Inter',system-ui,sans-serif",marginBottom:2}}>
@@ -3435,14 +3551,14 @@ function SKUDetail({sku, onBack, settings, setSettings, t, poUnits, setPoUnits, 
     )}
 
     {/* ── TOP CITIES ── */}
-    <div className="card" style={{marginBottom:10}}>
+    <div className="card" id="sec-top-cities" style={{marginBottom:10}}>
       <div className="ch">Top Cities by Demand</div>
       <TopCities citySales={citySales} t={t}/>
     </div>
 
     {/* ── 30-DAY SALES TREND ── */}
     {salesHistory&&salesHistory.length>1&&(
-    <div className="card" style={{marginBottom:10}}>
+    <div className="card" id="sec-sales-30d" style={{marginBottom:10}}>
       <div className="ch">Sales — Last 30 Days</div>
       <ResponsiveContainer width="100%" height={180}>
         <LineChart data={salesHistory} margin={{top:8,right:16,left:0,bottom:0}}>
@@ -3463,13 +3579,18 @@ function SKUDetail({sku, onBack, settings, setSettings, t, poUnits, setPoUnits, 
     )}
 
     {/* ── INDIA REGIONAL HEATMAP ── */}
-    <div className="card" style={{marginBottom:10}}>
+    <div className="card" id="sec-india-heatmap" style={{marginBottom:10}}>
       <div className="ch">India Regional Demand & Stock Heatmap</div>
-      <IndiaHeatmap regionalSales={regionalSales} fcPlanning={fcPlanning} settings={settings} velocity={vel} t={t}/>
+      <div style={{display:"grid",gridTemplateColumns:"340px 1fr",gap:16,alignItems:"stretch"}}>
+        <Suspense fallback={<div style={{display:"flex",alignItems:"center",justifyContent:"center",minHeight:240,color:t.text3,fontSize:11}}>Loading map…</div>}>
+          <FCMap t={t}/>
+        </Suspense>
+        <IndiaHeatmap regionalSales={regionalSales} fcPlanning={fcPlanning} settings={settings} velocity={vel} t={t}/>
+      </div>
     </div>
 
     {/* ── 70-DAY FORECAST with Reorder Line ── */}
-    <div className="card">
+    <div className="card" id="sec-70d-forecast">
       <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:12}}>
         <div className="ch" style={{marginBottom:0}}>70-Day Inventory Forecast</div>
         <div style={{display:"flex",gap:14,alignItems:"center",fontSize:9,fontFamily:"'Inter',system-ui,sans-serif"}}>

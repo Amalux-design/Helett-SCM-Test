@@ -142,4 +142,6 @@ export const SKU_MAP = {
   "B0H5R8L5LW":{"sellerSku":"HLT552 Portable Monitor Pro","finalName":"Portable Monitor Pro "},
   "B0H6QGN526":{"sellerSku":"2x1 Label Roll","finalName":"2x1 Label Roll"},
   "B0HCTXG4RD":{"sellerSku":"HLT551 Logic View Neo","finalName":"Logic View Neo"},
+  "B0HG4THQCH":{"sellerSku":"H80i BillQuick Neo-BT","finalName":"H80i BillQuick Neo-BT"},
+  "B0HH3NH8G5":{"sellerSku":"Helett Travel-Fi Neo","finalName":"Helett Travel-Fi Neo"},
 };

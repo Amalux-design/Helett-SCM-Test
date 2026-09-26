@@ -99,7 +99,7 @@ export const SKU_MAP = {
   "B0BRXVQ85M":{"sellerSku":"UNIY UY20+ Mini Led projector","finalName":"UY20+ Mini Projector"},
   "B0DTNVQ34H":{"sellerSku":"HE24 Label Tape","finalName":"HE24 Label Tape 12x30"},
   "B0FLV3V1W4":{"sellerSku":"Helett H65Clite Printer","finalName":"H65C Lite Printer"},
-  "B0FZSCW83R":{"sellerSku":"Helett H75C Printer","finalName":"H65C Mini Printer (New)"},
+  "B0FZSCW83R":{"sellerSku":"H65C Mini Printer Black (New)","finalName":"H65C Mini Printer Black (New)"},
   "B0BD9191XX":{"sellerSku":"UY400 mini Led Projector","finalName":"UY400 Mini Projector"},
   "B0FGCT1MWB":{"sellerSku":"Helett Ht15 Desktop Barcode Scanner","finalName":"HT15 Desktop Scanner"},
   "B0DQGSMG4N":{"sellerSku":"Helett Label Paper 4x6","finalName":"Label Paper 4x6"},

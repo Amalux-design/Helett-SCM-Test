@@ -143,5 +143,7 @@ export const SKU_MAP = {
   "B0H6QGN526":{"sellerSku":"2x1 Label Roll","finalName":"2x1 Label Roll"},
   "B0HCTXG4RD":{"sellerSku":"HLT551 Logic View Neo","finalName":"Logic View Neo"},
   "B0HG4THQCH":{"sellerSku":"H80i BillQuick Neo-BT","finalName":"H80i BillQuick Neo-BT"},
-  "B0HH3NH8G5":{"sellerSku":"Helett Travel-Fi Neo","finalName":"Helett Travel-Fi Neo"},
+  "B0HLPJK6W3":{"sellerSku":"H80I BillQuick Neo Gray","finalName":"H80I BillQuick Neo Gray"},
+  "B0HJTWN5N7":{"sellerSku":"BillQuick™ Mini","finalName":"BillQuick™ Mini"},
+  "B0HKZKM9QD":{"sellerSku":"H01 Labelholder Black","finalName":"H01 Labelholder Black"},
 };

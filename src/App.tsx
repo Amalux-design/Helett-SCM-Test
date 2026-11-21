@@ -1556,7 +1556,7 @@ function Dashboard({data,settings,setSettings,onSku,t,purchRows}){
         </tr></thead>
         <tbody>{alerts.map(d=>(
           <tr key={d.asin} className="cr" onClick={()=>onSku(d.asin)}>
-            <td><div className="tn">{d.finalName}</div><div className="ta">{d.sellerSku}</div></td>
+            <td><div className="tn" title={d.finalName}>{d.finalName}</div><div className="ta" title={d.sellerSku}>{d.sellerSku}</div></td>
             <td className="ta">{d.asin}</td>
             <td><DOI doi={d.planning.doi} t={t}/></td>
             <td>{fmt(stockOf(d))}</td>
@@ -1754,7 +1754,7 @@ function AllSKUs({data,settings,setSettings,onSku,t,setPoUnits,setExtraInbound,s
           return(
           <tr key={d.asin} className="cr" onClick={()=>onSku(d.asin)} style={picked.has(d.asin)?{background:t.accentBg}:undefined}>
             <td onClick={e=>togglePick(d.asin,e)}><input type="checkbox" checked={picked.has(d.asin)} onChange={()=>{}} style={{cursor:"pointer"}}/></td>
-            <td style={{textAlign:"left"}}><div className="tn">{d.finalName}</div><div className="ta">{d.sellerSku}</div></td>
+            <td style={{textAlign:"left"}}><div className="tn" title={d.finalName}>{d.finalName}</div><div className="ta" title={d.sellerSku}>{d.sellerSku}</div></td>
             <td style={{textAlign:"left"}} className="ta">{d.asin}</td>
             <td style={{textAlign:"left"}}><TrendLabel trend={calcTrend(d.velocity.avg7,d.velocity.avg30)} t={t}/></td>
             <td style={{fontWeight:700,color:hasPriorityDemand?t.accent:t.text}} title={hasPriorityDemand?`Priority Demand override active (weighted avg is ${fmt(d.velocity.demand,2)})`:undefined}>{fmt(displayDemand,2)}</td>
@@ -1991,7 +1991,7 @@ function FCView({data,settings,setSettings,onSku,t}){
                       return(
                         <tr key={sku.asin} className="cr" onClick={e=>{e.stopPropagation();onSku(sku.asin);}}>
                           <td style={{textAlign:"left"}}>
-                            <div className="tn">{sku.name}</div>
+                            <div className="tn" title={sku.name}>{sku.name}</div>
                             <div className="ta">{sku.asin}</div>
                           </td>
                           <td style={{fontWeight:700,color:sku.stock>0?t.text:t.red}}>{fmt(sku.stock)}</td>
@@ -2197,7 +2197,7 @@ function LISView({data, settings, setSettings, onSku, t}) {
                   <tr key={`${r.asin}-${r.fc}-${i}`} className="cr"
                                         onClick={()=>onSku(r.asin)}>
                     <td style={TD}>
-                      <div className="tn">{r.name}</div>
+                      <div className="tn" title={r.name}>{r.name}</div>
                       <div className="ta">{r.asin}</div>
                     </td>
                     <td style={{...TD,textAlign:"left"}}>
@@ -3975,7 +3975,7 @@ function SKUManager({skuCfg,setSkuCfg,data,settings,setSettings,t}){
                   {r.active?"Active":"Inactive"}
                 </button>
               </td>
-              <td style={{textAlign:"left"}}><div className="tn" style={{maxWidth:200}}>{r.finalName}</div></td>
+              <td style={{textAlign:"left"}}><div className="tn" style={{maxWidth:200}} title={r.finalName}>{r.finalName}</div></td>
               <td style={{textAlign:"left"}}><span className="ta">{r.asin}</span></td>
               <td style={{textAlign:"left"}}><span className="ta" style={{color:t.text2}}>{r.sellerSku}</span></td>
               <td style={{textAlign:"left"}}>

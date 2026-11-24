@@ -26,7 +26,7 @@ export default function PurchasePlanChart({ stock0, placedPos, d0, r, LT, airLT,
   const [totOv, setTotOv] = useState<number | null>(null);
   const [man, setMan] = useState<number[]>([]);
   const [airOv, setAirOv] = useState<number | null>(null);
-  const [follow, setFollow] = useState(true);
+  const [follow, setFollow] = useState(false);
   const [tip, setTip] = useState<{ x: number; y: number; head: string; lines: string[] } | null>(null);
   const [edit, setEdit] = useState<{ kind: "po" | "air"; k: number; x: number; y: number; val: string } | null>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
@@ -76,11 +76,11 @@ export default function PurchasePlanChart({ stock0, placedPos, d0, r, LT, airLT,
   const tickStep = maxDay > 400 ? 60 : 30;
   const ticks: number[] = []; for (let d = 0; d <= maxDay; d += tickStep) ticks.push(d);
   const trendPct = Math.round((r - 1) * 100);
-  const dirty = mode === "manual" || totOv !== null || nOv !== null || airOv !== null || nMoved > 0 || !follow;
+  const dirty = mode === "manual" || totOv !== null || nOv !== null || airOv !== null || nMoved > 0 || follow;
   const sr = plan.stockRow;
   const flatDays = d0 > 0 ? Math.floor(stock0 / d0) : 0;
 
-  function resetAll() { setMode("auto"); setTotOv(null); setNOv(null); setAirOv(null); setMoves({}); setFollow(true); setEdit(null); setTip(null); }
+  function resetAll() { setMode("auto"); setTotOv(null); setNOv(null); setAirOv(null); setMoves({}); setFollow(false); setEdit(null); setTip(null); }
   function toManual() { setMan(units.slice()); setMode("manual"); }
   function toAuto() { setTotOv(total); setNOv(null); setMode("auto"); }
   function onTotal(raw: string) {

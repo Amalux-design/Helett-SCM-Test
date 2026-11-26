@@ -2021,6 +2021,122 @@ function FCView({data,settings,setSettings,onSku,t}){
 }
 
 /* ═══════════════════════════════════════════════════════════════
+   STOCK COVER — every SKU × FC, no threshold
+   FC DOI = stock at that FC / that FC's ledger demand.
+   SKU cover = planning DOI (same figure as All SKUs).
+═══════════════════════════════════════════════════════════════ */
+function StockCoverView({data, settings, setSettings, onSku, t}) {
+  const [q,setQ]=useState("");
+  const [fcFil,setFcFil]=useState("all");
+  const [sort,setSort]=useState({col:"doi",dir:-1});
+
+  const COLORS:any={stockout:t.red,critical:t.red,low:t.orange,ok:t.green,surplus:t.text2,nosales:t.yellow,none:t.text3};
+  const LABELS:any={stockout:"Stockout",critical:"Critical",low:"Low",ok:"OK",surplus:"Surplus",nosales:"No sales",none:"No stock"};
+
+  const rows=useMemo(()=>{
+    const out:any[]=[];
+    Object.values(data).forEach((d:any)=>{
+      const sku={asin:d.asin,name:d.finalName,sellerSku:d.sellerSku,
+        totalStock:d.currentStock,cover:d.planning.doi};
+      const fcs=(d.fcPlanning?.fcs||[]).filter((f:any)=>f.stock||f.demand||f.inTransit||f.unsellable);
+      if(!fcs.length){
+        out.push({...sku,fc:"",fcLabel:"",stock:null,demand:null,doi:null,inTransit:null,unsellable:null,status:null});
+        return;
+      }
+      fcs.forEach((f:any)=>out.push({...sku,fc:f.fc,fcLabel:f.label,stock:f.stock,demand:f.demand,
+        doi:f.demand>0?f.doi:f.stock>0?Infinity:null,inTransit:f.inTransit,unsellable:f.unsellable,
+        status:f.demand>0?f.status:f.stock>0?"nosales":"none"}));
+    });
+    return out;
+  },[data]);
+
+  const fcCodes=useMemo(()=>[...new Set(rows.map(r=>r.fc).filter(Boolean))].sort() as string[],[rows]);
+
+  const filtered=useMemo(()=>{
+    const lq=q.trim().toLowerCase();
+    const {col,dir}=sort;
+    return rows
+      .filter(r=>(fcFil==="all"||r.fc===fcFil) &&
+        (!lq||[r.name,r.asin,r.sellerSku,r.fc,r.fcLabel].some(v=>String(v||"").toLowerCase().includes(lq))))
+      .sort((a,b)=>{
+        const va=a[col], vb=b[col];
+        // blanks always sink to the bottom, whichever direction
+        const ea=va===null||va===""||va===undefined, eb=vb===null||vb===""||vb===undefined;
+        if(ea||eb) return ea&&eb?0:ea?1:-1;
+        if(typeof va==="string") return dir*va.localeCompare(vb);
+        if(va===vb) return (b.stock||0)-(a.stock||0);
+        return va>vb?dir:-dir;
+      });
+  },[rows,q,fcFil,sort]);
+
+  const COLS=[
+    {col:"name",label:"SKU",text:true},
+    {col:"fc",label:"FC",text:true},
+    {col:"stock",label:"FC stock"},
+    {col:"demand",label:"Demand/day"},
+    {col:"doi",label:"FC DOI"},
+    {col:"totalStock",label:"Total stock"},
+    {col:"cover",label:"SKU cover days"},
+    {col:"inTransit",label:"In transit"},
+    {col:"unsellable",label:"Unsellable"},
+    {col:"status",label:"Status",text:true},
+  ];
+  const toggle=(col:string,text?:boolean)=>setSort(p=>p.col===col?{col,dir:-p.dir}:{col,dir:text?1:-1});
+  const days=(v:any)=>v===null?"—":isFinite(v)?fmt(v,1)+"d":"∞";
+  const num=(v:any,dp=0)=>v===null?"—":fmt(v,dp);
+
+  function exportCSV(){
+    downloadCSV("stock_cover.csv",
+      ["SKU Name","Seller SKU","ASIN","FC","FC Location","FC Stock","Demand/Day","FC DOI (days)","Total Stock","SKU Cover (days)","In Transit","Unsellable","Status"],
+      filtered.map(r=>[r.name,r.sellerSku,r.asin,r.fc,r.fcLabel,r.stock??"",r.demand??"",
+        r.doi===null?"":isFinite(r.doi)?r.doi.toFixed(1):"No sales",r.totalStock,
+        isFinite(r.cover)?r.cover.toFixed(1):"No sales",r.inTransit??"",r.unsellable??"",r.status?LABELS[r.status]:""]));
+  }
+
+  const TD:any={textAlign:"right",whiteSpace:"nowrap"};
+
+  return(<div>
+    <SBar settings={settings} setSettings={setSettings} t={t}/>
+    <div className="srow" style={{marginBottom:10}}>
+      <div className="sbox">
+        <span style={{color:t.text3}}>⌕</span>
+        <input placeholder="SKU, ASIN or FC…" value={q} onChange={e=>setQ(e.target.value)}/>
+      </div>
+      <Select className="sel" value={fcFil} onChange={e=>setFcFil(e.target.value)}>
+        <option value="all">All FCs</option>
+        {fcCodes.map(c=><option key={c} value={c}>{c}</option>)}
+      </Select>
+      <span style={{marginLeft:"auto",fontSize:12.5,color:t.text3}}>{filtered.length} rows · click a header to sort</span>
+      <button className="btn" onClick={exportCSV}>Export CSV</button>
+    </div>
+    <div className="tw ts"><table style={{minWidth:980}}>
+      <thead><tr>
+        {COLS.map(c=>(
+          <th key={c.col} onClick={()=>toggle(c.col,c.text)} aria-sort={sort.col===c.col?(sort.dir===1?"ascending":"descending"):"none"}
+            style={{cursor:"pointer",userSelect:"none",textAlign:c.text?"left":"right",color:sort.col===c.col?t.accent:undefined}}>
+            {c.label}{sort.col===c.col?(sort.dir===1?" ↑":" ↓"):""}
+          </th>
+        ))}
+      </tr></thead>
+      <tbody>{filtered.map(r=>(
+        <tr key={r.asin+"|"+r.fc} className="cr" onClick={()=>onSku(r.asin)}>
+          <td style={{textAlign:"left"}}><div className="tn" title={r.name}>{r.name}</div><div className="ta">{r.asin}</div></td>
+          <td style={{textAlign:"left"}}>{r.fc?<><div style={{fontWeight:600}}>{r.fc}</div><div style={{fontSize:12,color:t.text3}}>{r.fcLabel}</div></>:"—"}</td>
+          <td style={TD}>{num(r.stock)}</td>
+          <td style={TD}>{num(r.demand,2)}</td>
+          <td style={{...TD,fontWeight:700,color:r.status?COLORS[r.status]:t.text3}}>{days(r.doi)}</td>
+          <td style={TD}>{num(r.totalStock)}</td>
+          <td style={{...TD,fontWeight:700}}>{days(r.cover)}</td>
+          <td style={TD}>{num(r.inTransit)}</td>
+          <td style={TD}>{num(r.unsellable)}</td>
+          <td style={{textAlign:"left"}}>{r.status?<span className="badge" style={{["--bc" as any]:COLORS[r.status]}}>{LABELS[r.status]}</span>:"—"}</td>
+        </tr>
+      ))}</tbody>
+    </table></div>
+  </div>);
+}
+
+/* ═══════════════════════════════════════════════════════════════
    LIS — Send-Stock Recommendation List
    Flat list of SKU × FC, sourced from fcPlanning.recommendations
    Same logic as SKUDetail send-stock section. Sorted by DOI asc.
@@ -4522,7 +4638,7 @@ function FBAPlannerApp({onLogout,authEmail}:{onLogout?:()=>void;authEmail?:strin
   }).length:0;
 
   const TITLES={input:"Data Input",dashboard:"Dashboard",allskus:"All SKUs",
-    fc:"FC View",lis:"LIS — Send Stock",procurement:"Procurement Forecast",
+    fc:"FC View",cover:"Stock Cover",lis:"LIS — Send Stock",procurement:"Procurement Forecast",
     skumgr:"SKU Manager",warnings:"Data Quality"};
   const pageTitle = tab==="detail"&&selSku&&data?.[selSku]
     ? data[selSku].finalName
@@ -4533,6 +4649,7 @@ function FBAPlannerApp({onLogout,authEmail}:{onLogout?:()=>void;authEmail?:strin
     {id:"dashboard",ic:"DB",l:"Dashboard"},
     {id:"allskus",ic:"SKU",l:"All SKUs"},
     {id:"fc",ic:"FC",l:"FC View",badge:fcCrit,bc:"b"},
+    {id:"cover",ic:"CV",l:"Stock Cover"},
     {id:"lis",ic:"LIS",l:"LIS",badge:critCount||null,bc:"r"},
     {id:"procurement",ic:"PR",l:"Procurement",badge:procCrit,bc:""},
     {id:"skumgr",ic:"MG",l:"SKU Manager",badge:inactiveCount||null,bc:"y"},
@@ -4668,6 +4785,7 @@ function FBAPlannerApp({onLogout,authEmail}:{onLogout?:()=>void;authEmail?:strin
           {data&&<div style={{display:tab==="allskus"?"block":"none"}}><AllSKUs data={data} settings={settings} setSettings={setSettings} onSku={goSku} t={t} setPoUnits={setPoUnits} setExtraInbound={setExtraInbound} skuCfg={skuCfg} setSkuCfg={setSkuCfg}/></div>}
           {tab==="dashboard"&&data&&booted&&<Dashboard data={data} settings={settings} setSettings={setSettings} onSku={goSku} t={t} purchRows={rawData?.purchRows||[]}/>}
           {tab==="fc"&&data&&<FCView data={data} settings={settings} setSettings={setSettings} onSku={goSku} t={t}/>}
+          {tab==="cover"&&data&&<StockCoverView data={data} settings={settings} setSettings={setSettings} onSku={goSku} t={t}/>}
           {tab==="lis"&&data&&<LISView data={data} settings={settings} setSettings={setSettings} onSku={goSku} t={t}/>}
           {tab==="procurement"&&data&&<ProcurementForecast data={data} ltData={rawData?.ltData} anchorDate={rawData?.maxDate} openPoMap={openPoMap||{}} settings={settings} t={t}/>}
           {tab==="skumgr"&&<SKUManager skuCfg={skuCfg} setSkuCfg={setSkuCfg} data={data} settings={settings} setSettings={setSettings} t={t}/>}
